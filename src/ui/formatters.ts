@@ -7,15 +7,15 @@ import type { WatcherServiceStatus } from "../scheduler/service-installer.js";
 export function formatTopologyLabel(type?: QuotaTopologyType | null): string {
   switch (type) {
     case "TWO_TIER_WINDOW":
-      return "2-Tier Window (Macro-Cap + Micro-Finestra)";
+      return "2-Tier Window (Macro-Cap + Rolling Window)";
     case "SINGLE_CYCLE_CAP":
-      return "Single-Cycle Cap (Sessione Continua)";
+      return "Single-Cycle Cap (Continuous Session)";
     case "ROLLING_ONLY":
-      return "Rolling-Only (Slot Notturni Quiet Hours)";
+      return "Rolling-Only (Quiet Hours Windows)";
     case "MULTI_BUCKET_CASCADE":
       return "Multi-Model Cascade (Opus -> Sonnet / o3)";
     default:
-      return "Topologia Adattiva Standard";
+      return "Standard Adaptive Topology";
   }
 }
 
@@ -31,7 +31,7 @@ export function formatHeaderBanner(options: {
   const line = pc.cyan("─".repeat(64));
   const lines: string[] = [
     line,
-    pc.bold(pc.cyan("  WorthEveryToken (wet) v2.1 — Zero-Bleed Autonomous Token Burner")),
+    pc.bold(pc.cyan("  WorthEveryToken (wet) v2.2 — Zero-Bleed Autonomous Token Burner")),
     line
   ];
 
@@ -40,15 +40,15 @@ export function formatHeaderBanner(options: {
 
   // Topology line
   const topologyStr = formatTopologyLabel(options.topologyType);
-  lines.push(`  ${pc.bold("Topologia:")}   ${pc.magenta(topologyStr)}`);
+  lines.push(`  ${pc.bold("Topology:")}    ${pc.magenta(topologyStr)}`);
 
   // Invisibility & Guard Status
-  lines.push(`  ${pc.bold("Invisibilità:")} ${pc.green("Activity Guard: attivo ✓")} | ${pc.green("Repo HEAD intoccato ✓")}`);
+  lines.push(`  ${pc.bold("Invisibility:")} ${pc.green("Activity Guard: active ✓")} | ${pc.green("Repo HEAD untouched ✓")}`);
 
   // Watcher status line
   const watcherStr = options.watcher?.active
-    ? pc.green(`Attivo (${options.watcher.method}) ✓`)
-    : pc.yellow("Non attivo / manuale");
+    ? pc.green(`Active (${options.watcher.method}) ✓`)
+    : pc.yellow("Inactive / manual");
   lines.push(`  ${pc.bold("Watcher:")}     ${watcherStr}`);
 
   // Active project line
@@ -59,38 +59,38 @@ export function formatHeaderBanner(options: {
         : options.activeProject.status === "waiting_window_reset"
         ? pc.yellow(options.activeProject.status)
         : options.activeProject.status === "yielded_to_user"
-        ? pc.yellow("yielded_to_user (pausa attività umana)")
+        ? pc.yellow("yielded_to_user (paused for user activity)")
         : pc.cyan(options.activeProject.status);
-    lines.push(`  ${pc.bold("Progetto:")}    ${pc.bold(options.activeProject.repoName)} [${statusColor}]`);
+    lines.push(`  ${pc.bold("Project:")}     ${pc.bold(options.activeProject.repoName)} [${statusColor}]`);
     lines.push(`              ${pc.dim(options.activeProject.repoPath)}`);
   } else {
-    lines.push(`  ${pc.bold("Progetto:")}    ${pc.dim("Nessun progetto armato sulla macchina")}`);
+    lines.push(`  ${pc.bold("Project:")}     ${pc.dim("No armed project on this machine")}`);
   }
 
   // Quota & Wave plan summary
   if (options.usage) {
-    const weeklyUsed = options.usage.weeklyUsedPct !== null ? `${options.usage.weeklyUsedPct}%` : "n/d";
-    const window5h = options.usage.window5hUsedPct !== null ? `${options.usage.window5hUsedPct}%` : "n/d";
-    lines.push(`  ${pc.bold("Quota:")}       Uso macro-ciclo: ${pc.yellow(weeklyUsed)} | Micro-finestra: ${pc.yellow(window5h)}`);
+    const weeklyUsed = options.usage.weeklyUsedPct !== null ? `${options.usage.weeklyUsedPct}%` : "n/a";
+    const window5h = options.usage.window5hUsedPct !== null ? `${options.usage.window5hUsedPct}%` : "n/a";
+    lines.push(`  ${pc.bold("Quota:")}       Macro-cycle: ${pc.yellow(weeklyUsed)} | Rolling window: ${pc.yellow(window5h)}`);
   }
 
   if (options.plan) {
     const remStr = `${options.plan.remainingPct.toFixed(1)}%`;
-    const wavesStr = options.plan.wavesNeeded > 0 ? `${options.plan.wavesNeeded} ondate pianificate` : "Nessuna ondata";
-    lines.push(`  ${pc.bold("Pianif.:")}     Residuo target: ${pc.cyan(remStr)} | ${pc.bold(wavesStr)}`);
+    const wavesStr = options.plan.wavesNeeded > 0 ? `${options.plan.wavesNeeded} waves planned` : "No waves";
+    lines.push(`  ${pc.bold("Schedule:")}    Target remaining: ${pc.cyan(remStr)} | ${pc.bold(wavesStr)}`);
 
     // Zero-Bleed status
-    const hardStopStr = options.plan.hardStopAt ? options.plan.hardStopAt.toLocaleTimeString() : "attivo";
-    lines.push(`  ${pc.bold("Zero-Bleed:")}  ${pc.red(`Hard Stop alle ${hardStopStr} (20m pre-reset) ✓`)}`);
+    const hardStopStr = options.plan.hardStopAt ? options.plan.hardStopAt.toLocaleTimeString() : "active";
+    lines.push(`  ${pc.bold("Zero-Bleed:")}  ${pc.red(`Hard Stop at ${hardStopStr} (10m pre-reset) ✓`)}`);
 
     if (options.plan.action === "WAIT_UNTIL_START") {
-      lines.push(`              ${pc.magenta(`Avvio previsto: ${options.plan.plannedStartAt.toLocaleString()}`)}`);
+      lines.push(`              ${pc.magenta(`Scheduled start: ${options.plan.plannedStartAt.toLocaleString()}`)}`);
     } else if (options.plan.action === "START_WAVE_NOW") {
-      lines.push(`              ${pc.green(`IN CORSO: Ondata ${options.plan.waveIndex} di ${options.plan.wavesNeeded}`)}`);
+      lines.push(`              ${pc.green(`IN PROGRESS: Wave ${options.plan.waveIndex} of ${options.plan.wavesNeeded}`)}`);
     } else if (options.plan.action === "WAIT_WINDOW_UNLOCK" && options.plan.nextWakeAt) {
-      lines.push(`              ${pc.yellow(`Attesa sblocco micro-finestra: ${options.plan.nextWakeAt.toLocaleTimeString()}`)}`);
+      lines.push(`              ${pc.yellow(`Waiting for rolling window unlock: ${options.plan.nextWakeAt.toLocaleTimeString()}`)}`);
     } else if (options.plan.action === "STOP_BEFORE_RESET") {
-      lines.push(`              ${pc.red(`Hard Stop pre-reset attivo: nessun token del nuovo ciclo verrà toccato`)}`);
+      lines.push(`              ${pc.red(`Pre-reset Hard Stop active: no tokens from new cycle will be used`)}`);
     }
   }
 
@@ -100,11 +100,11 @@ export function formatHeaderBanner(options: {
 
 export function formatWaveTimelineTable(plan: WavePlan): string {
   if (plan.timeline.length === 0) {
-    return pc.dim("Nessuna ondata pianificata nella finestra attuale.");
+    return pc.dim("No waves scheduled in current window.");
   }
 
   const lines: string[] = [
-    pc.bold("Piano Ondate Adattivo:"),
+    pc.bold("Adaptive Wave Plan:"),
     pc.dim("─".repeat(60))
   ];
 
@@ -115,13 +115,13 @@ export function formatWaveTimelineTable(plan: WavePlan): string {
     const burnStr = `~${entry.estimatedBurnPct}% quota`;
     const modelTag = entry.model ? ` [${entry.model}]` : "";
     lines.push(
-      `${prefix}${pc.bold(`Ondata ${entry.waveIndex}`)}: ${pc.cyan(timeStr)} (${pc.yellow(burnStr)})${modelTag}`
+      `${prefix}${pc.bold(`Wave ${entry.waveIndex}`)}: ${pc.cyan(timeStr)} (${pc.yellow(burnStr)})${modelTag}`
     );
   }
 
   lines.push(pc.dim("─".repeat(60)));
   lines.push(
-    `Zero-Bleed Hard Stop: ${pc.red(plan.hardStopAt.toLocaleTimeString())} (20 min prima del reset)`
+    `Zero-Bleed Hard Stop: ${pc.red(plan.hardStopAt.toLocaleTimeString())} (10 min before reset)`
   );
 
   return lines.join("\n");
@@ -129,19 +129,19 @@ export function formatWaveTimelineTable(plan: WavePlan): string {
 
 export function formatUsageReport(usage: UsageSnapshot): string {
   const lines: string[] = [
-    pc.bold("Rilevamento Limiti & Quota Provider:"),
+    pc.bold("Provider Limits & Quota Probe:"),
     `• Provider: ${pc.green(usage.provider)}`,
-    `• Fonte dati: ${pc.cyan(usage.source)}`,
-    `• Quota consumata: ${usage.weeklyUsedPct !== null ? pc.yellow(`${usage.weeklyUsedPct}%`) : "sconosciuta"}`,
-    `• Reset ciclo principale: ${usage.weeklyResetAt ? pc.magenta(usage.weeklyResetAt.toLocaleString()) : "non rilevato"}`,
-    `• Micro-finestra rolling: ${usage.window5hUsedPct !== null ? pc.yellow(`${usage.window5hUsedPct}%`) : "sconosciuta"}`,
-    `• Reset micro-finestra: ${usage.window5hResetAt ? pc.magenta(usage.window5hResetAt.toLocaleTimeString()) : "non rilevato"}`
+    `• Data source: ${pc.cyan(usage.source)}`,
+    `• Quota consumed: ${usage.weeklyUsedPct !== null ? pc.yellow(`${usage.weeklyUsedPct}%`) : "unknown"}`,
+    `• Primary cycle reset: ${usage.weeklyResetAt ? pc.magenta(usage.weeklyResetAt.toLocaleString()) : "not detected"}`,
+    `• Rolling window: ${usage.window5hUsedPct !== null ? pc.yellow(`${usage.window5hUsedPct}%`) : "unknown"}`,
+    `• Rolling reset: ${usage.window5hResetAt ? pc.magenta(usage.window5hResetAt.toLocaleTimeString()) : "not detected"}`
   ];
 
   if (usage.buckets && usage.buckets.length > 0) {
-    lines.push(`• Bucket rilevati (${usage.buckets.length}):`);
+    lines.push(`• Detected buckets (${usage.buckets.length}):`);
     for (const b of usage.buckets) {
-      lines.push(`  - [${b.id}] role: ${b.role}, durata: ${b.durationHours}h, usato: ${b.usedPct}%`);
+      lines.push(`  - [${b.id}] role: ${b.role}, duration: ${b.durationHours}h, used: ${b.usedPct}%`);
     }
   }
 

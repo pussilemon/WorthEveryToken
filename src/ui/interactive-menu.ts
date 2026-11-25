@@ -41,10 +41,10 @@ async function isCommandAvailable(cmd: string): Promise<boolean> {
 }
 
 export async function runFirstRunWizard(): Promise<WetGlobalConfig> {
-  p.intro(pc.bold(pc.cyan("Benvenuto in WorthEveryToken (wet) v2 — Setup Iniziale")));
+  p.intro(pc.bold(pc.cyan("Welcome to WorthEveryToken (wet) v2.2 — Initial Setup")));
 
   const s = p.spinner();
-  s.start("Rilevamento CLI installate nel PATH...");
+  s.start("Detecting installed AI CLIs in PATH...");
 
   const [hasClaude, hasCodex, hasAgy, hasGemini] = await Promise.all([
     isCommandAvailable("claude"),
@@ -53,103 +53,103 @@ export async function runFirstRunWizard(): Promise<WetGlobalConfig> {
     isCommandAvailable("gemini")
   ]);
 
-  s.stop("Rilevamento completato.");
+  s.stop("Detection complete.");
 
   const providerOptions = [
     {
       value: "claude" as ProviderId,
-      label: `Anthropic Claude Code ${hasClaude ? pc.green("(installato ✓)") : pc.dim("(non trovato)")}`,
-      hint: "Consigliato per Opus e abbonamenti Claude Pro/Max"
+      label: `Anthropic Claude Code ${hasClaude ? pc.green("(installed ✓)") : pc.dim("(not found)")}`,
+      hint: "Recommended for Opus and Claude Pro/Max subscriptions"
     },
     {
       value: "codex" as ProviderId,
-      label: `OpenAI Codex CLI ${hasCodex ? pc.green("(installato ✓)") : pc.dim("(non trovato)")}`,
-      hint: "Consigliato per o3-mini e abbonamenti OpenAI Plus/Pro"
+      label: `OpenAI Codex CLI ${hasCodex ? pc.green("(installed ✓)") : pc.dim("(not found)")}`,
+      hint: "Recommended for o3-mini and OpenAI Plus/Pro subscriptions"
     },
     {
       value: "agy" as ProviderId,
-      label: `Google Antigravity CLI (agy) ${hasAgy ? pc.green("(installato ✓)") : pc.dim("(non trovato)")}`,
-      hint: "Consigliato per abbonamenti Google Agy Pro"
+      label: `Google Antigravity CLI (agy) ${hasAgy ? pc.green("(installed ✓)") : pc.dim("(not found)")}`,
+      hint: "Recommended for Google Agy Pro subscriptions"
     },
     {
       value: "gemini" as ProviderId,
-      label: `Google Gemini CLI ${hasGemini ? pc.green("(installato ✓)") : pc.dim("(non trovato)")}`,
-      hint: "Consigliato per Gemini 2.5 Pro / Flash"
+      label: `Google Gemini CLI ${hasGemini ? pc.green("(installed ✓)") : pc.dim("(not found)")}`,
+      hint: "Recommended for Gemini 2.5 Pro / Flash"
     },
     {
       value: "custom" as ProviderId,
-      label: "Custom Provider (qualsiasi CLI esterna)",
-      hint: "Configurabile con comandi personalizzati"
+      label: "Custom Provider (generic external CLI)",
+      hint: "Configurable with custom CLI commands"
     }
   ];
 
-  // Passaggio 1: Scegli l'unico provider attivo
+  // Step 1: Choose single active provider
   const defaultProvider = hasClaude ? "claude" : hasCodex ? "codex" : hasAgy ? "agy" : hasGemini ? "gemini" : "claude";
 
   const selectedProvider = await p.select({
-    message: "Passaggio 1/3 — Scegli l'abbonamento AI attivo da ottimizzare:",
+    message: "Step 1/3 — Choose the active AI subscription to optimize:",
     options: providerOptions,
     initialValue: defaultProvider
   });
 
   if (p.isCancel(selectedProvider)) {
-    p.cancel("Setup annullato.");
+    p.cancel("Setup cancelled.");
     process.exit(0);
   }
 
   const globalConfig = loadGlobalConfig();
   globalConfig.provider = selectedProvider as ProviderId;
 
-  // Passaggio 2: Auto-rilevamento live
-  s.start(`Passaggio 2/3 — Rilevamento automatico quota, bucket e topologia per ${selectedProvider}...`);
+  // Step 2: Auto-detect live quota and topology
+  s.start(`Step 2/3 — Detecting quota, buckets, and topology for ${selectedProvider}...`);
   const adapter = getAdapter(globalConfig.provider, globalConfig);
   const usage = await adapter.probeUsage();
-  s.stop("Rilevamento live completato.");
+  s.stop("Live detection complete.");
 
   const topology = classifyTopology(usage.buckets);
   const topologyLabel = formatTopologyLabel(topology.type);
 
   if (usage.weeklyResetAt && usage.weeklyUsedPct !== null) {
     p.note(
-      `Topologia: ${pc.magenta(topologyLabel)}\nReset rilevato: ${pc.cyan(usage.weeklyResetAt.toLocaleString())}\nQuota usata: ${pc.yellow(`${usage.weeklyUsedPct}%`)} (residuo ${(100 - usage.weeklyUsedPct).toFixed(0)}%)`,
-      "Topologia e Quota rilevate con successo ✓"
+      `Topology: ${pc.magenta(topologyLabel)}\nDetected reset: ${pc.cyan(usage.weeklyResetAt.toLocaleString())}\nQuota used: ${pc.yellow(`${usage.weeklyUsedPct}%`)} (remaining ${(100 - usage.weeklyUsedPct).toFixed(0)}%)`,
+      "Topology and Quota detected successfully ✓"
     );
   } else {
     p.note(
-      `Topologia: ${pc.magenta(topologyLabel)}\nLa CLI non ha fornito la data di reset esatta. Verrà applicato il fallback (Lunedì 08:00).`,
-      "Configurazione orario fallback"
+      `Topology: ${pc.magenta(topologyLabel)}\nCLI did not report an exact reset timestamp. Fallback schedule will apply (Monday 08:00).`,
+      "Fallback Schedule Configured"
     );
   }
 
-  // Passaggio 3: Modalità invisibile in background
+  // Step 3: Background invisible mode
   const installWatcher = await p.confirm({
-    message: "Passaggio 3/3 — Attivare la Modalità Invisibile in background (systemd/cron + Zero-Touch Git)?",
+    message: "Step 3/3 — Enable Invisible Background Mode (systemd/cron + Zero-Touch Git)?",
     initialValue: true
   });
 
   if (p.isCancel(installWatcher)) {
-    p.cancel("Setup annullato.");
+    p.cancel("Setup cancelled.");
     process.exit(0);
   }
 
   saveGlobalConfig(globalConfig);
 
   if (installWatcher) {
-    s.start("Installazione del watcher in background...");
+    s.start("Installing background watcher...");
     const res = await installBackgroundWatcher();
     s.stop(res.message);
     if (res.lingerWarning) {
-      p.note(res.lingerWarning, "Avviso per sessioni SSH");
+      p.note(res.lingerWarning, "Notice for SSH Sessions");
     }
 
     const cwd = process.cwd();
     if (fs.existsSync(path.join(cwd, ".git"))) {
       armProject(cwd, { forceReplace: true });
-      p.note(`Cartella corrente "${path.basename(cwd)}" armata automaticamente in modalità invisibile!`, "Progetto Armato");
+      p.note(`Current directory "${path.basename(cwd)}" automatically armed in invisible mode!`, "Project Armed");
     }
   }
 
-  p.outro(pc.green("WorthEveryToken v2.1 configurato con successo!"));
+  p.outro(pc.green("WorthEveryToken v2.2 configured successfully!"));
   return globalConfig;
 }
 
@@ -217,67 +217,67 @@ export async function runInteractiveMenu(): Promise<void> {
   const isGit = fs.existsSync(path.join(cwd, ".git"));
 
   const action = await p.select({
-    message: "Cosa desideri fare?",
+    message: "What would you like to do?",
     options: [
       {
         value: "arm",
-        label: `1. Attiva / Pianifica questa cartella per il prossimo ciclo pre-reset`,
-        hint: isGit ? cwd : "Attenzione: la cartella corrente non è un repo Git"
+        label: "1. Arm / Schedule this repository for the next pre-reset cycle",
+        hint: isGit ? cwd : "Warning: current directory is not a Git repository"
       },
       {
         value: "run_now",
-        label: "2. Avvia una sessione adesso (Audit + Fix immediati sul progetto corrente)",
-        hint: "Esegue subito la pipeline senza attendere il reset"
+        label: "2. Run an immediate session (Audit + Fix tasks on current project now)",
+        hint: "Executes pipeline immediately without waiting for reset"
       },
       {
         value: "view_plan",
-        label: "3. Mostra Piano Ondate & Stato dettagliato",
-        hint: "Calcolo live ondate da 5h, timeline e calibrazione %"
+        label: "3. View Wave Plan & detailed status",
+        hint: "Live 5h wave calculation, timeline, and calibration %"
       },
       {
         value: "view_report",
-        label: "4. Apri / Stampa l'ultimo Report generato",
+        label: "4. Open / Print latest generated Report",
         hint: ".wet/REPORT-*.md"
       },
       {
         value: "disarm",
-        label: "5. Disattiva / Annulla il progetto attualmente pianificato sulla macchina",
-        hint: machineState.activeProject ? machineState.activeProject.repoName : "Nessuno armato"
+        label: "5. Disarm / Cancel current scheduled project on this machine",
+        hint: machineState.activeProject ? machineState.activeProject.repoName : "None armed"
       },
       {
         value: "settings",
-        label: "6. Impostazioni (Cambia provider, watcher background, ricalibra)",
-        hint: "Configurazione ~/.wet/config.yaml"
+        label: "6. Settings (Change provider, background watcher, sync benchmarks)",
+        hint: "Configure ~/.wet/config.yaml"
       },
       {
         value: "exit",
-        label: "7. Esci",
-        hint: "Termina il menu"
+        label: "7. Exit",
+        hint: "Quit menu"
       }
     ]
   });
 
   if (p.isCancel(action) || action === "exit") {
-    p.outro("Arrivederci!");
+    p.outro("Goodbye!");
     return;
   }
 
   switch (action) {
     case "arm": {
       if (!isGit) {
-        p.note("La cartella corrente non è una directory Git. Entra in una repo Git prima di armare.", "Errore");
+        p.note("Current directory is not a Git repository. Navigate to a Git repo before arming.", "Error");
         return;
       }
 
       const armResult = armProject(cwd, { forceReplace: false });
       if (armResult.conflict && armResult.existingProject) {
         const replace = await p.confirm({
-          message: `Il progetto attivo attualmente è "${armResult.existingProject.repoName}" (${armResult.existingProject.repoPath}).\nVuoi annullare la pianificazione precedente e attivare questa cartella?`,
+          message: `The active project is currently "${armResult.existingProject.repoName}" (${armResult.existingProject.repoPath}).\nDo you want to disarm it and schedule this directory?`,
           initialValue: false
         });
 
         if (!replace || p.isCancel(replace)) {
-          p.outro("Pianificazione precedente mantenuta inalterata.");
+          p.outro("Previous schedule preserved unchanged.");
           return;
         }
 
@@ -288,7 +288,7 @@ export async function runInteractiveMenu(): Promise<void> {
       const gates = autoDetectQualityGates(cwd);
       p.note(
         gates.map((g) => `• ${g.name}: ${g.cmd}`).join("\n"),
-        "Quality gates rilevati automaticamente per questo progetto"
+        "Quality gates automatically detected for this project"
       );
 
       // Ensure .gitignore has .wet
@@ -300,16 +300,16 @@ export async function runInteractiveMenu(): Promise<void> {
         }
       }
 
-      p.outro(pc.green(`Progetto ${path.basename(cwd)} armato con successo!`));
+      p.outro(pc.green(`Project ${path.basename(cwd)} armed successfully!`));
       break;
     }
 
     case "run_now": {
-      p.intro(pc.cyan("Avvio sessione immediata..."));
+      p.intro(pc.cyan("Starting immediate session..."));
       const wetConfig = loadConfig(cwd);
       const orchestrator = new Orchestrator(wetConfig, adapter);
       await orchestrator.run({ resume: true });
-      p.outro(pc.green("Sessione completata!"));
+      p.outro(pc.green("Session completed!"));
       break;
     }
 
@@ -318,47 +318,47 @@ export async function runInteractiveMenu(): Promise<void> {
       if (usage) {
         console.log(formatUsageReport(usage) + "\n");
       }
-      p.outro("Piano visualizzato.");
+      p.outro("Plan displayed.");
       break;
     }
 
     case "view_report": {
       const wetDir = path.join(cwd, ".wet");
       if (!fs.existsSync(wetDir)) {
-        p.note("Nessuna cartella .wet trovata in questo progetto.", "Info");
+        p.note("No .wet directory found in this project.", "Info");
         return;
       }
       const files = fs.readdirSync(wetDir).filter((f) => f.startsWith("REPORT-") && f.endsWith(".md"));
       if (files.length === 0) {
-        p.note("Nessun report generato trovato in .wet/", "Info");
+        p.note("No generated report found in .wet/", "Info");
         return;
       }
       files.sort().reverse();
       const latest = path.join(wetDir, files[0]!);
       const content = fs.readFileSync(latest, "utf-8");
       console.log("\n" + content + "\n");
-      p.outro(`Report visualizzato: ${files[0]}`);
+      p.outro(`Report displayed: ${files[0]}`);
       break;
     }
 
     case "disarm": {
       const disarmed = disarmProject();
       if (disarmed) {
-        p.outro(pc.yellow(`Progetto ${disarmed.repoName} disarmato. Nessun lavoro automatico in coda.`));
+        p.outro(pc.yellow(`Project ${disarmed.repoName} disarmed. No automated work queued.`));
       } else {
-        p.outro("Nessun progetto era armato.");
+        p.outro("No project was armed.");
       }
       break;
     }
 
     case "settings": {
       const settingChoice = await p.select({
-        message: "Cosa vuoi configurare?",
+        message: "What would you like to configure?",
         options: [
-          { value: "provider", label: "Cambia provider attivo" },
-          { value: "watcher_install", label: "Reinstalla watcher di sistema" },
-          { value: "watcher_uninstall", label: "Rimuovi watcher di sistema" },
-          { value: "sync_benchmarks", label: "Sincronizza benchmark esterni adesso" }
+          { value: "provider", label: "Change active provider" },
+          { value: "watcher_install", label: "Reinstall background watcher" },
+          { value: "watcher_uninstall", label: "Remove background watcher" },
+          { value: "sync_benchmarks", label: "Synchronize external benchmarks now" }
         ]
       });
 
@@ -374,10 +374,10 @@ export async function runInteractiveMenu(): Promise<void> {
         p.outro(res.message);
       } else if (settingChoice === "sync_benchmarks") {
         const s = p.spinner();
-        s.start("Sincronizzazione benchmark da aicodingdaily.com...");
+        s.start("Syncing benchmarks from aicodingdaily.com...");
         await calibEngine.syncExternalBenchmarks(globalConfig.calibration.benchmark_source_url, 0);
-        s.stop("Sincronizzazione completata.");
-        p.outro("Cache aggiornata.");
+        s.stop("Synchronization complete.");
+        p.outro("Cache updated.");
       }
       break;
     }

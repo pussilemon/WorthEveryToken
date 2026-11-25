@@ -3,7 +3,7 @@ project:
   base_branch: "main"
   audit_branch_prefix: "ai-weekend-audit"
   worktree_dir: ".wet/worktrees"
-  max_parallel_workers: 2            # 1 = sequenziale puro, 2-3 = parallelo su worktree disgiunti
+  max_parallel_workers: 2            # 1 = strictly sequential, 2-3 = parallel on disjoint worktrees
 
 limits:
   max_total_tasks: 25
@@ -12,18 +12,18 @@ limits:
   claude_max_turns_per_task: 18
   claude_max_budget_usd_per_task: 2.50
   claude_max_session_budget_usd: 25.00
-  stop_at_five_hour_quota_pct: 90    # Arresto pulito al 90% della finestra 5h
-  stop_at_weekly_quota_pct: 95       # Arresto pulito al 95% del tetto settimanale
-  agy_wall_clock_timeout_sec: 180    # Kill forzato se agy -p si blocca
-  agy_silence_watchdog_sec: 60       # Kill forzato se 0 byte su PTY/stdout per 60s
+  stop_at_five_hour_quota_pct: 90    # Clean halt at 90% of rolling 5h window
+  stop_at_weekly_quota_pct: 95       # Clean halt at 95% of weekly macro cap
+  agy_wall_clock_timeout_sec: 180    # Force kill if agy hangs
+  agy_silence_watchdog_sec: 60       # Force kill if 0 bytes on PTY/stdout for 60s
 
 routing:
   claude_categories: ["bug", "race_condition", "memory_leak", "security", "edge_case"]
   agy_categories: ["test_coverage", "tech_debt", "typing_lint"]
-  agy_fallback_to_claude: true       # Se agy va in timeout/errore, riesegue il task su Claude
+  agy_fallback_to_claude: true       # If agy times out or errors, retry task on Claude
 
 quality_gates:
-  auto_detect: true                  # Rileva package.json / pyproject.toml / go.mod
+  auto_detect: true                  # Detects package.json / pyproject.toml / go.mod
   commands:
     - name: "typecheck"
       cmd: "npm run typecheck"
@@ -35,11 +35,11 @@ quality_gates:
 
 agy:
   binary: "agy"
-  use_pty: true                      # Obbligatorio per mitigare bug hang non-TTY (issue #318)
-  disable_slow_mcp: true             # Mitigazione server MCP lenti in headless (issue #342)
+  use_pty: true                      # Required to mitigate non-TTY hang bug (issue #318)
+  disable_slow_mcp: true             # Mitigation for slow MCP servers in headless mode (issue #342)
   extra_args: ["--output-format", "json"]
 
 claude:
   binary: "claude"
-  model: "sonnet"                    # Modello di default per esecuzione Fase 2
-  audit_model: "opus"                # Modello per analisi/audit Fase 1
+  model: "sonnet"                    # Default model for Phase 2 task execution
+  audit_model: "opus"                # Model for Phase 1 analysis/audit

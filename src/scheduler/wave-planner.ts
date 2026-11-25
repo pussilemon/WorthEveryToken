@@ -193,7 +193,7 @@ export function computeExecutionPlan(input: ExecutionPlanInput): WavePlan {
         waveIndex: i,
         plannedStartAt: waveStart,
         estimatedBurnPct: estBurn,
-        description: `Ondata ${i}: avvio ${waveStart.toLocaleTimeString()} (burn ~${estBurn}%)`
+        description: `Wave ${i}: start ${waveStart.toLocaleTimeString()} (burn ~${estBurn}%)`
       });
     }
 
@@ -305,7 +305,7 @@ export function computeExecutionPlan(input: ExecutionPlanInput): WavePlan {
         waveIndex: 1,
         plannedStartAt,
         estimatedBurnPct: remainingPct,
-        description: `Sessione continua: avvio ${plannedStartAt.toLocaleTimeString()} (burn stimato ~${remainingPct.toFixed(1)}%)`
+        description: `Continuous session: start ${plannedStartAt.toLocaleTimeString()} (est. burn ~${remainingPct.toFixed(1)}%)`
       }
     ];
 

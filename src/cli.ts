@@ -136,15 +136,15 @@ if (process.argv.length <= 2) {
         });
 
         console.log("\n" + formatUsageReport(usage));
-        console.log(`\n• Topologia rilevata: ${topology.type}`);
-        console.log(`• Calibrazione tasso/finestra: ${weeklyPctPer5hWave}% (fonte: ${source})`);
-        console.log(`• Modello top rilevato: ${topModel.model}`);
+        console.log(`\n• Detected topology: ${topology.type}`);
+        console.log(`• Rate/window calibration: ${weeklyPctPer5hWave}% (source: ${source})`);
+        console.log(`• Detected top model: ${topModel.model}`);
         if (plan.selectedModel) {
-          console.log(`• Modello selezionato nel cascade: ${plan.selectedModel}`);
+          console.log(`• Selected model in cascade: ${plan.selectedModel}`);
         }
         if (plan.action === "FAIL_CLOSED_UNKNOWN_RESET") {
-          console.log(`\n⚠️  FAIL-CLOSED ATTIVO: ${plan.summary}`);
-          console.log("   Nessun token verrà bruciato finché non è noto con sicurezza l'orario di reset.\n");
+          console.log(`\n⚠️  FAIL-CLOSED ACTIVE: ${plan.summary}`);
+          console.log("   No tokens will be burned until the reset timestamp is authoritatively known.\n");
         } else {
           console.log("\n" + formatWaveTimelineTable(plan) + "\n");
         }

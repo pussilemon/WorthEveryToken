@@ -94,13 +94,13 @@ WantedBy=timers.target
     const linger = await isLingerEnabled(username);
     let lingerWarning: string | undefined;
     if (!linger) {
-      lingerWarning = `Per mantenere attivo il timer dopo la chiusura della sessione SSH, esegui:\n  loginctl enable-linger ${username}`;
+      lingerWarning = `To keep the timer active after closing your SSH session, run:\n  loginctl enable-linger ${username}`;
     }
 
     logger.info("Successfully installed wet-watch systemd --user timer");
     return {
       method: "systemd",
-      message: "Timer systemd --user installato e attivato con frequenza ogni 15 minuti.",
+      message: "systemd --user timer installed and enabled (runs every 15 minutes).",
       lingerWarning
     };
   }
@@ -129,7 +129,7 @@ WantedBy=timers.target
   logger.info("Successfully installed wet-watch in crontab");
   return {
     method: "cron",
-    message: "Watch job installato nel crontab con frequenza ogni 15 minuti."
+    message: "Watch job installed in crontab (runs every 15 minutes)."
   };
 }
 
@@ -178,7 +178,7 @@ export async function uninstallBackgroundWatcher(): Promise<{ success: boolean; 
 
   return {
     success: true,
-    message: removedAny ? "Watcher in background rimosso con successo." : "Nessun watcher attivo trovato."
+    message: removedAny ? "Background watcher successfully removed." : "No active watcher found."
   };
 }
 
@@ -191,7 +191,7 @@ export async function getWatcherStatus(): Promise<WatcherServiceStatus> {
         installed: true,
         method: "systemd",
         active: true,
-        details: "Timer systemd --user attivo (ogni 15m)"
+        details: "systemd --user timer active (every 15m)"
       };
     }
   } catch {
@@ -206,7 +206,7 @@ export async function getWatcherStatus(): Promise<WatcherServiceStatus> {
         installed: true,
         method: "cron",
         active: true,
-        details: "Crontab job attivo (ogni 15m)"
+        details: "Crontab job active (every 15m)"
       };
     }
   } catch {
@@ -216,6 +216,6 @@ export async function getWatcherStatus(): Promise<WatcherServiceStatus> {
   return {
     installed: false,
     active: false,
-    details: "Nessun watcher in background installato"
+    details: "No background watcher installed"
   };
 }

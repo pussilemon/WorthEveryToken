@@ -55,7 +55,7 @@ export class CycleGuard {
       return { abort: false };
     }
 
-    // Controllo C: Orologio oltre il confine
+    // Check C: Clock beyond cycle boundary
     if (now.getTime() >= lockedCycleResetAt.getTime()) {
       logger.warn(
         { now: now.toISOString(), lockedCycleResetAt: lockedCycleResetAt.toISOString() },
@@ -64,7 +64,7 @@ export class CycleGuard {
       return { abort: true, reason: "EARLY_RESET_DETECTED_ABORT (Clock passed cycle reset)" };
     }
 
-    // Controllo A: Salto in avanti del timestamp di reset (> 60 minuti)
+    // Check A: Forward jump in reset timestamp (> 60 minutes)
     if (currentResetAt) {
       const resetDriftMs = currentResetAt.getTime() - lockedCycleResetAt.getTime();
       if (resetDriftMs > 60 * 60_000) {
@@ -76,7 +76,7 @@ export class CycleGuard {
       }
     }
 
-    // Controllo B: Crollo improvviso della percentuale usata (>= 20%)
+    // Check B: Sudden drop in used percentage (>= 20%)
     if (cyclePeakUsedPct !== null && currentUsedPct !== null) {
       const dropPct = cyclePeakUsedPct - currentUsedPct;
       if (dropPct >= 20) {
@@ -91,7 +91,7 @@ export class CycleGuard {
     return { abort: false };
   }
 
-  // Level 4: Blocco risvegli a cavallo del reset
+  // Level 4: Block wakeups straddling reset
   public static shouldScheduleWakeup(subWindowResetAt: Date, hardStopAt: Date): boolean {
     const nextWakeMs = subWindowResetAt.getTime() + 2 * 60_000;
     if (nextWakeMs >= hardStopAt.getTime()) {
@@ -104,7 +104,7 @@ export class CycleGuard {
     return true;
   }
 
-  // Level 5: Fail-closed se il reset è sconosciuto
+  // Level 5: Fail-closed if reset timestamp is unknown
   public static isResetKnownAndSafe(resetAt: Date | null, confidence: "high" | "medium" | "low" = "medium"): boolean {
     if (!resetAt) {
       logger.warn("CycleGuard [Level 5]: Primary reset timestamp is null. Fail-closed enforced.");
