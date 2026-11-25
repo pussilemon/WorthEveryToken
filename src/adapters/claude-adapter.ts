@@ -231,6 +231,10 @@ export class ClaudeAdapter implements AgentAdapter {
     args.push("--output-format", "stream-json");
     args.push("--verbose");
 
+    if (options.extraFlags && options.extraFlags.length > 0) {
+      args.push(...options.extraFlags);
+    }
+
     if (options.maxTurns) {
       args.push("--max-turns", String(options.maxTurns));
     }

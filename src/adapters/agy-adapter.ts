@@ -152,7 +152,10 @@ export class AgyAdapter implements AgentAdapter {
 
   public async execute(prompt: string, options: AgentExecutionOptions): Promise<ExecutionResult> {
     const startTime = Date.now();
-    const args = ["-p", prompt, ...this.extraArgs];
+    const args = ["-p", prompt, ...this.extraArgs, ...(options.extraFlags ?? [])];
+    if (options.model && options.model !== "auto") {
+      args.push("--model", options.model);
+    }
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
       TERM: "xterm-256color"

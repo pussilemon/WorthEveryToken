@@ -31,7 +31,7 @@ export function formatHeaderBanner(options: {
   const line = pc.cyan("─".repeat(64));
   const lines: string[] = [
     line,
-    pc.bold(pc.cyan("  WorthEveryToken (wet) v2.2 — Zero-Bleed Autonomous Token Burner")),
+    pc.bold(pc.cyan("  WorthEveryToken (wet) v2.2.1 — Zero-Bleed Autonomous Token Burner")),
     line
   ];
 

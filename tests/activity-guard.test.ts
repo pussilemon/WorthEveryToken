@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -6,6 +6,7 @@ import { execa } from "execa";
 import {
   isInsideQuietHours,
   hasRecentRepoEdits,
+  hasRecentAiLogWrites,
   checkUserActivity
 } from "../src/scheduler/activity-guard.js";
 import type { WetGlobalConfig } from "../src/config/schema.js";
@@ -29,6 +30,52 @@ describe("UserActivityGuard (Invisible Mode & Auto-Yield)", () => {
     if (fs.existsSync(tmpRepo)) {
       fs.rmSync(tmpRepo, { recursive: true, force: true });
     }
+  });
+
+  describe("hasRecentAiLogWrites", () => {
+    it("should ignore recent .jsonl log writes in encoded wet worktree folders", () => {
+      const mockHome = fs.mkdtempSync(path.join(os.tmpdir(), "wet-mock-home-"));
+      const projectsDir = path.join(mockHome, ".claude", "projects");
+      const wetWorktreeDir = path.join(projectsDir, "myrepo--wet-worktrees-T-001");
+      fs.mkdirSync(wetWorktreeDir, { recursive: true });
+
+      const logFile = path.join(wetWorktreeDir, "session.jsonl");
+      fs.writeFileSync(logFile, '{"type":"assistant_message"}\n', "utf-8");
+      // Modified 1 second ago
+      const oneSecAgo = new Date(Date.now() - 1000);
+      fs.utimesSync(logFile, oneSecAgo, oneSecAgo);
+
+      const spy = vi.spyOn(os, "homedir").mockReturnValue(mockHome);
+      try {
+        const result = hasRecentAiLogWrites(15);
+        expect(result).toBe(false);
+      } finally {
+        spy.mockRestore();
+        fs.rmSync(mockHome, { recursive: true, force: true });
+      }
+    });
+
+    it("should detect recent .jsonl log writes in regular human project folders", () => {
+      const mockHome = fs.mkdtempSync(path.join(os.tmpdir(), "wet-mock-home-"));
+      const projectsDir = path.join(mockHome, ".claude", "projects");
+      const regularDir = path.join(projectsDir, "my-normal-project");
+      fs.mkdirSync(regularDir, { recursive: true });
+
+      const logFile = path.join(regularDir, "session.jsonl");
+      fs.writeFileSync(logFile, '{"type":"user_message"}\n', "utf-8");
+      // Modified 10 seconds ago
+      const tenSecAgo = new Date(Date.now() - 10000);
+      fs.utimesSync(logFile, tenSecAgo, tenSecAgo);
+
+      const spy = vi.spyOn(os, "homedir").mockReturnValue(mockHome);
+      try {
+        const result = hasRecentAiLogWrites(15);
+        expect(result).toBe(true);
+      } finally {
+        spy.mockRestore();
+        fs.rmSync(mockHome, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("isInsideQuietHours", () => {

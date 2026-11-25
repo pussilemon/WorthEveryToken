@@ -27,6 +27,9 @@ export function loadConfig(configPathOrDir = "wet.config.yaml"): WetConfig {
   if (!fs.existsSync(configFile)) {
     const defaultConfig = ConfigSchema.parse({});
     defaultConfig.project.root = targetRoot;
+    if (defaultConfig.quality_gates.auto_detect) {
+      defaultConfig.quality_gates.commands = autoDetectQualityGates(targetRoot);
+    }
     return defaultConfig;
   }
 
@@ -37,10 +40,19 @@ export function loadConfig(configPathOrDir = "wet.config.yaml"): WetConfig {
     if (!path.isAbsolute(config.project.root)) {
       config.project.root = path.resolve(targetRoot, config.project.root);
     }
+    if (config.quality_gates.auto_detect || !parsed?.quality_gates?.commands) {
+      const detected = autoDetectQualityGates(config.project.root);
+      if (detected.length > 0) {
+        config.quality_gates.commands = detected;
+      }
+    }
     return config;
   } catch {
     const defaultConfig = ConfigSchema.parse({});
     defaultConfig.project.root = targetRoot;
+    if (defaultConfig.quality_gates.auto_detect) {
+      defaultConfig.quality_gates.commands = autoDetectQualityGates(targetRoot);
+    }
     return defaultConfig;
   }
 }
@@ -90,10 +102,15 @@ export function autoDetectQualityGates(projectRoot: string): QualityGateCommand[
   }
 
   if (gates.length === 0) {
+    const pm = fs.existsSync(path.join(projectRoot, "pnpm-lock.yaml"))
+      ? "pnpm"
+      : fs.existsSync(path.join(projectRoot, "yarn.lock"))
+        ? "yarn"
+        : "npm";
     gates.push(
-      { name: "typecheck", cmd: "npm run typecheck" },
-      { name: "lint", cmd: "npm run lint" },
-      { name: "test", cmd: "npm test" }
+      { name: "typecheck", cmd: `${pm} run typecheck` },
+      { name: "lint", cmd: `${pm} run lint` },
+      { name: "test", cmd: `${pm} test` }
     );
   }
 

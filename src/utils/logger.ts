@@ -1,6 +1,7 @@
 import pino from "pino";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 
 export interface LoggerOptions {
   logDir?: string;
@@ -8,7 +9,7 @@ export interface LoggerOptions {
 }
 
 export function initLogger(options: LoggerOptions = {}) {
-  const logDir = options.logDir ?? ".wet/logs";
+  const logDir = options.logDir ?? path.join(os.homedir(), ".wet", "logs");
   const verbose = options.verbose ?? false;
 
   try {

@@ -294,12 +294,13 @@ export async function runWatchTick(): Promise<WatchTickResult> {
           }
         }
 
-        // 3. User activity guard
+        // 3. User activity guard (ignore AI logs during wave execution to avoid self-yield)
         const activity = await checkUserActivity(
           activeProject.repoPath,
           globalConfig.provider,
           globalConfig,
-          hoursUntilReset
+          hoursUntilReset,
+          { ignoreAiLogs: true }
         );
         if (activity.active) {
           return { allowed: false, reason: `YIELDED_TO_USER: ${activity.reason}` };

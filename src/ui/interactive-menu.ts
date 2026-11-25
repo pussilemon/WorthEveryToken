@@ -9,7 +9,8 @@ import {
   saveGlobalConfig,
   loadMachineState,
   armProject,
-  disarmProject
+  disarmProject,
+  updateLastKnownUsage
 } from "../config/global-store.js";
 import { type ProviderId, type WetGlobalConfig } from "../config/schema.js";
 import { getAdapter } from "../adapters/registry.js";
@@ -41,7 +42,7 @@ async function isCommandAvailable(cmd: string): Promise<boolean> {
 }
 
 export async function runFirstRunWizard(): Promise<WetGlobalConfig> {
-  p.intro(pc.bold(pc.cyan("Welcome to WorthEveryToken (wet) v2.2 — Initial Setup")));
+  p.intro(pc.bold(pc.cyan("Welcome to WorthEveryToken (wet) v2.2.1 — Initial Setup")));
 
   const s = p.spinner();
   s.start("Detecting installed AI CLIs in PATH...");
@@ -106,6 +107,18 @@ export async function runFirstRunWizard(): Promise<WetGlobalConfig> {
   const usage = await adapter.probeUsage();
   s.stop("Live detection complete.");
 
+  updateLastKnownUsage({
+    provider: usage.provider,
+    probedAt: usage.probedAt.toISOString(),
+    source: usage.source,
+    buckets: usage.buckets,
+    weeklyUsedPct: usage.weeklyUsedPct,
+    weeklyResetAt: usage.weeklyResetAt ? usage.weeklyResetAt.toISOString() : null,
+    window5hUsedPct: usage.window5hUsedPct,
+    window5hResetAt: usage.window5hResetAt ? usage.window5hResetAt.toISOString() : null,
+    detectedModel: usage.detectedModel ?? null
+  });
+
   const topology = classifyTopology(usage.buckets);
   const topologyLabel = formatTopologyLabel(topology.type);
 
@@ -149,7 +162,7 @@ export async function runFirstRunWizard(): Promise<WetGlobalConfig> {
     }
   }
 
-  p.outro(pc.green("WorthEveryToken v2.2 configured successfully!"));
+  p.outro(pc.green("WorthEveryToken v2.2.1 configured successfully!"));
   return globalConfig;
 }
 

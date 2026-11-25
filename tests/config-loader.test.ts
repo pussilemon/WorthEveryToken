@@ -67,4 +67,15 @@ describe("ConfigLoader & Path Resolution (Anti-EISDIR & cwd Independence)", () =
     expect(resolvedWetDir).toBe(path.resolve(tmpDir, ".wet"));
     expect(path.isAbsolute(resolvedWetDir)).toBe(true);
   });
+
+  it("should auto-detect Python quality gates when pyproject.toml is present and wet.config.yaml is absent", () => {
+    fs.writeFileSync(path.join(tmpDir, "pyproject.toml"), '[project]\nname = "my-python-app"\n', "utf-8");
+
+    const config = loadConfig(tmpDir);
+    expect(config.quality_gates.commands).toEqual([
+      { name: "lint", cmd: "ruff check ." },
+      { name: "typecheck", cmd: "mypy ." },
+      { name: "test", cmd: "pytest" }
+    ]);
+  });
 });

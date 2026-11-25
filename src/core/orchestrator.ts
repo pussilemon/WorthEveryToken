@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { type WetConfig, type Backlog, type Task } from "../config/schema.js";
+import { type WetConfig, type Backlog, type Task, type WetGlobalConfig } from "../config/schema.js";
 import { GitManager } from "../git/git-manager.js";
 import { DagScheduler, type TaskExecutionOutcome } from "./dag-scheduler.js";
 import { type AgentAdapter } from "../adapters/agent-adapter.js";
@@ -11,9 +11,10 @@ import { CycleGuard } from "../scheduler/cycle-guard.js";
 import { QuotaGuard } from "../telemetry/quota-guard.js";
 import { BurnProfiler } from "../telemetry/burn-profiler.js";
 import { Reporter } from "../telemetry/reporter.js";
-import { compilePrompt, loadBacklog, saveBacklog, getWetDir } from "../config/loader.js";
+import { compilePrompt, loadBacklog, saveBacklog, getWetDir, autoDetectQualityGates } from "../config/loader.js";
 import { parseBacklogJson, parseFixPlanMd, type ExecutionResult } from "../adapters/agent-adapter.js";
 import { logger } from "../utils/logger.js";
+import { loadGlobalConfig } from "../config/global-store.js";
 
 export interface OrchestratorRunOptions {
   dryRun?: boolean;
@@ -43,6 +44,7 @@ export interface WaveRunResult {
 
 export class Orchestrator {
   private readonly config: WetConfig;
+  private readonly globalConfig: WetGlobalConfig;
   private readonly gitManager: GitManager;
   private readonly adapter: AgentAdapter;
   private readonly qualityGatesRunner: QualityGatesRunner;
@@ -53,9 +55,15 @@ export class Orchestrator {
   private stopReason = "Backlog completed";
   private rateLimitType?: "5h" | "weekly";
 
-  constructor(config: WetConfig, adapter?: AgentAdapter) {
+  constructor(config: WetConfig, adapter?: AgentAdapter, globalConfig?: WetGlobalConfig) {
     this.config = config;
+    this.globalConfig = globalConfig ?? loadGlobalConfig();
     const wetDir = getWetDir(config.project.root);
+
+    if (config.quality_gates.auto_detect) {
+      config.quality_gates.commands = autoDetectQualityGates(config.project.root);
+    }
+
     this.gitManager = new GitManager({
       repoRoot: config.project.root,
       baseBranch: config.project.base_branch,
@@ -107,9 +115,10 @@ export class Orchestrator {
         MAX_TASKS: String(max)
       });
 
-      const modelProfile = this.adapter.getTopModelProfile(this.config as any);
+      const modelProfile = this.adapter.getTopModelProfile(this.globalConfig);
       result = await this.adapter.runAudit(auditPrompt, auditWorktreePath, {
         model: modelProfile.model,
+        extraFlags: modelProfile.extraFlags,
         allowedTools: "Read,Glob,Grep",
         phase: "audit"
       });
@@ -271,7 +280,7 @@ export class Orchestrator {
         return "aborted";
       }
 
-      const modelProfile = this.adapter.getTopModelProfile(this.config as any);
+      const modelProfile = this.adapter.getTopModelProfile(this.globalConfig);
       const effectiveModel = options.selectedModel ?? modelProfile.model;
 
       logger.info({ taskId: task.id, provider: this.adapter.provider, model: effectiveModel }, "Executing task in isolated worktree");
@@ -299,6 +308,7 @@ export class Orchestrator {
           maxBudgetUsd: this.config.limits.claude_max_budget_usd_per_task,
           deadlineAt: options.hardStopAt,
           model: effectiveModel,
+          extraFlags: modelProfile.extraFlags,
           taskId: task.id,
           phase: "execute"
         });
@@ -350,7 +360,9 @@ export class Orchestrator {
           this.gitManager,
           this.config.limits.max_retries_per_task,
           "prompts/phase3-repair.md",
-          options.hardStopAt
+          options.hardStopAt,
+          effectiveModel,
+          modelProfile.extraFlags
         );
 
         if (!gatesPassed) {

@@ -91,7 +91,7 @@ export class GeminiAdapter implements AgentAdapter {
 
   public async execute(prompt: string, options: AgentExecutionOptions): Promise<ExecutionResult> {
     const startTime = Date.now();
-    const args: string[] = ["-p", prompt, "--output-format", "json"];
+    const args: string[] = ["-p", prompt, "--output-format", "json", ...(options.extraFlags ?? [])];
     if (options.model) {
       args.push("-m", options.model);
     }

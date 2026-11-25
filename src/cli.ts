@@ -36,8 +36,8 @@ const program = new Command();
 
 program
   .name("wet")
-  .description("WorthEveryToken (wet) v2.2 — Autonomous Multi-Cycle Token Burner & Quota Optimizer")
-  .version("2.2.0");
+  .description("WorthEveryToken (wet) v2.2.1 — Autonomous Multi-Cycle Token Burner & Quota Optimizer")
+  .version("2.2.1");
 
 // 1. Interactive TUI default when no args are passed
 if (process.argv.length <= 2) {

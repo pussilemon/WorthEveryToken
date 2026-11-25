@@ -15,6 +15,7 @@ export interface AgentExecutionOptions {
   maxTurns?: number;
   maxBudgetUsd?: number;
   model?: string;
+  extraFlags?: string[];
   allowedTools?: string;
   phase?: "audit" | "execute" | "repair";
   taskId?: string;

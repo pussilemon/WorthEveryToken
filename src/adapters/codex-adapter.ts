@@ -17,6 +17,69 @@ export interface CodexAdapterConfig {
   defaultModel?: string;
 }
 
+export function extractTextFromCodexStream(rawOutput: string): string {
+  const lines = rawOutput.split(/\r?\n/);
+  const textChunks: string[] = [];
+  let parsedAnyJson = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(trimmed);
+      parsedAnyJson = true;
+
+      if (typeof parsed === "object" && parsed !== null) {
+        if (typeof parsed.content === "string") {
+          textChunks.push(parsed.content);
+        } else if (Array.isArray(parsed.content)) {
+          for (const item of parsed.content) {
+            if (typeof item === "string") textChunks.push(item);
+            else if (item && typeof item.text === "string") textChunks.push(item.text);
+            else if (item && typeof item.content === "string") textChunks.push(item.content);
+          }
+        }
+
+        if (typeof parsed.text === "string") {
+          textChunks.push(parsed.text);
+        }
+
+        if (parsed.item && typeof parsed.item === "object") {
+          if (typeof parsed.item.content === "string") {
+            textChunks.push(parsed.item.content);
+          } else if (Array.isArray(parsed.item.content)) {
+            for (const item of parsed.item.content) {
+              if (typeof item === "string") textChunks.push(item);
+              else if (item && typeof item.text === "string") textChunks.push(item.text);
+            }
+          } else if (typeof parsed.item.text === "string") {
+            textChunks.push(parsed.item.text);
+          }
+        }
+
+        if (parsed.delta && typeof parsed.delta === "object") {
+          if (typeof parsed.delta.text === "string") textChunks.push(parsed.delta.text);
+          else if (typeof parsed.delta.content === "string") textChunks.push(parsed.delta.content);
+        }
+
+        if (parsed.message && typeof parsed.message === "object") {
+          if (typeof parsed.message.content === "string") textChunks.push(parsed.message.content);
+        }
+      }
+    } catch {
+      // Line is not valid JSON
+    }
+  }
+
+  if (parsedAnyJson && textChunks.length > 0) {
+    return textChunks.join("\n");
+  }
+
+  return rawOutput;
+}
+
 export class CodexAdapter implements AgentAdapter {
   public readonly provider = "codex" as const;
   private readonly binary: string;
@@ -143,6 +206,10 @@ export class CodexAdapter implements AgentAdapter {
       args.push("-m", options.model);
     }
 
+    if (options.extraFlags && options.extraFlags.length > 0) {
+      args.push(...options.extraFlags);
+    }
+
     let input: string | undefined = undefined;
     if (prompt.length > 32 * 1024) {
       args.push("-");
@@ -214,12 +281,14 @@ export class CodexAdapter implements AgentAdapter {
       const result = await subprocess;
       const durationMs = Date.now() - startTime;
 
+      const extractedText = extractTextFromCodexStream(fullOutput);
+
       if (rateLimited) {
         return {
           exitCode: 429,
           status: "RATE_LIMITED",
           digest: null,
-          output: fullOutput,
+          output: extractedText,
           error: fullStderr,
           rateLimitReset,
           rateLimitType,
@@ -227,15 +296,15 @@ export class CodexAdapter implements AgentAdapter {
         };
       }
 
-      const signal = parseExitSignal(fullOutput);
-      const digest = parseDigest(fullOutput);
+      const signal = parseExitSignal(extractedText);
+      const digest = parseDigest(extractedText);
 
       if (signal.status === "BLOCKED") {
         return {
           exitCode: 0,
           status: "BLOCKED",
           digest,
-          output: fullOutput,
+          output: extractedText,
           blockedReason: signal.reason,
           metrics: { durationMs }
         };
@@ -247,7 +316,7 @@ export class CodexAdapter implements AgentAdapter {
             exitCode: 0,
             status: "DONE",
             digest,
-            output: fullOutput,
+            output: extractedText,
             metrics: { durationMs }
           };
         }
@@ -263,7 +332,7 @@ export class CodexAdapter implements AgentAdapter {
             tests_added: 0,
             risks: []
           },
-          output: fullOutput,
+          output: extractedText,
           metrics: { durationMs }
         };
       }
@@ -272,13 +341,14 @@ export class CodexAdapter implements AgentAdapter {
         exitCode: result.exitCode ?? 1,
         status: "FAILED",
         digest,
-        output: fullOutput,
+        output: extractedText,
         error: signal.status === null ? "Missing <WET_EXIT_SIGNAL status=\"DONE\"/> marker" : fullStderr,
         metrics: { durationMs }
       };
     } catch (err: any) {
       const durationMs = Date.now() - startTime;
-      const errCombined = `${fullOutput}\n${fullStderr}\n${err?.stdout ?? ""}\n${err?.stderr ?? ""}\n${err?.message ?? ""}`;
+      const extractedOutput = extractTextFromCodexStream(fullOutput);
+      const errCombined = `${extractedOutput}\n${fullStderr}\n${err?.stdout ?? ""}\n${err?.stderr ?? ""}\n${err?.message ?? ""}`;
       const isRateLimit =
         /rate[_\s]limit|429|quota|usage limit|too many requests/i.test(errCombined) ||
         err?.exitCode === 429;
@@ -290,7 +360,7 @@ export class CodexAdapter implements AgentAdapter {
           exitCode: 429,
           status: "RATE_LIMITED",
           digest: null,
-          output: fullOutput || errCombined,
+          output: extractedOutput || errCombined,
           error: err?.message || "Rate limit reached in codex",
           rateLimitReset: parsed.window5hResetAt?.toISOString() ?? parsed.weeklyResetAt?.toISOString(),
           rateLimitType: isWeekly ? "weekly" : "5h",
@@ -301,8 +371,8 @@ export class CodexAdapter implements AgentAdapter {
       return {
         exitCode: err?.exitCode ?? 1,
         status: "FAILED",
-        digest: parseDigest(fullOutput),
-        output: fullOutput,
+        digest: parseDigest(extractedOutput),
+        output: extractedOutput,
         error: err?.message || String(err),
         metrics: { durationMs }
       };

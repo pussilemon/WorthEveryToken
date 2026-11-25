@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { CodexAdapter } from "../src/adapters/codex-adapter.js";
+import { CodexAdapter, extractTextFromCodexStream } from "../src/adapters/codex-adapter.js";
+import { parseExitSignal, parseDigest } from "../src/adapters/agent-adapter.js";
 
 describe("CodexAdapter (Flags, Sandboxing & Rate Limit Classification)", () => {
   it("should configure proper flags for audit (--sandbox read-only, no -p flag for prompt)", async () => {
@@ -63,5 +64,38 @@ describe("CodexAdapter (Flags, Sandboxing & Rate Limit Classification)", () => {
     expect(result.status).toBe("RATE_LIMITED");
     expect(result.exitCode).toBe(429);
     expect(result.rateLimitType).toBe("weekly");
+  });
+
+  it("should unwrap text, escaped exit signal, and nested digest from NDJSON stream", () => {
+    const ndjson = [
+      JSON.stringify({ type: "session.created", id: "sess_123" }),
+      JSON.stringify({
+        type: "item.created",
+        item: {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "text",
+              text: 'Applied the requested security fix.\n<WET_EXIT_SIGNAL status="DONE"/>\n<WET_DIGEST>{"files_changed":["src/auth.ts"],"summary":"Patched timing attack in token check","tests_added":2,"risks":[]}</WET_DIGEST>'
+            }
+          ]
+        }
+      }),
+      JSON.stringify({ type: "response.completed" })
+    ].join("\n");
+
+    const text = extractTextFromCodexStream(ndjson);
+    expect(text).toContain('<WET_EXIT_SIGNAL status="DONE"/>');
+    expect(text).toContain("<WET_DIGEST>");
+    expect(text).toContain("src/auth.ts");
+
+    const signal = parseExitSignal(text);
+    expect(signal.status).toBe("DONE");
+
+    const digest = parseDigest(text);
+    expect(digest?.files_changed).toEqual(["src/auth.ts"]);
+    expect(digest?.summary).toBe("Patched timing attack in token check");
+    expect(digest?.tests_added).toBe(2);
   });
 });

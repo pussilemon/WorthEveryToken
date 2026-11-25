@@ -50,13 +50,20 @@ export function hasRecentAiLogWrites(userIdleMinutes = 15): boolean {
     if (!fs.existsSync(claudeProjectsDir)) return false;
 
     const thresholdMs = Date.now() - userIdleMinutes * 60_000;
+    const isExcludedPath = (p: string) =>
+      /\.wet|wet-worktrees|wet-audit-worktree|wet-audit-head|--wet-|-wet-worktrees-|-wet-audit-/.test(p);
 
     const checkDir = (dir: string): boolean => {
+      if (isExcludedPath(dir)) return false;
       const entries = fs.readdirSync(dir, { withFileTypes: true });
       for (const entry of entries) {
         const fullPath = path.join(dir, entry.name);
+        if (isExcludedPath(entry.name) || isExcludedPath(fullPath)) {
+          continue;
+        }
+
         if (entry.isDirectory()) {
-          if (entry.name !== ".wet" && checkDir(fullPath)) return true;
+          if (checkDir(fullPath)) return true;
         } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
           const stats = fs.statSync(fullPath);
           if (stats.mtimeMs > thresholdMs) {
@@ -191,11 +198,16 @@ export function isInsideQuietHours(
   return currentMinutes >= startMinutes && currentMinutes < endMinutes;
 }
 
+export interface CheckUserActivityOptions {
+  ignoreAiLogs?: boolean;
+}
+
 export async function checkUserActivity(
   repoPath: string,
   provider: ProviderId,
   config: WetGlobalConfig,
-  hoursUntilExpiry?: number | null
+  hoursUntilExpiry?: number | null,
+  options?: CheckUserActivityOptions
 ): Promise<ActivityCheckResult> {
   // 1. Interactive CLI process check
   const interactiveCli = await hasInteractiveCliProcess(provider);
@@ -203,10 +215,12 @@ export async function checkUserActivity(
     return { active: true, reason: "Interactive AI CLI session detected" };
   }
 
-  // 2. Recent AI log writes
-  const recentAiLogs = hasRecentAiLogWrites(config.schedule.user_idle_minutes);
-  if (recentAiLogs) {
-    return { active: true, reason: "Recent human AI usage detected" };
+  // 2. Recent AI log writes (skip if ignoreAiLogs is true)
+  if (!options?.ignoreAiLogs) {
+    const recentAiLogs = hasRecentAiLogWrites(config.schedule.user_idle_minutes);
+    if (recentAiLogs) {
+      return { active: true, reason: "Recent human AI usage detected" };
+    }
   }
 
   // 3. Active editing on repository

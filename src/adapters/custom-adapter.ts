@@ -93,6 +93,7 @@ export class CustomAdapter implements AgentAdapter {
 
   private async executeArgs(args: string[], options: AgentExecutionOptions): Promise<ExecutionResult> {
     const startTime = Date.now();
+    const finalArgs = [...args, ...(options.extraFlags ?? [])];
     let fullOutput = "";
     let fullStderr = "";
 
@@ -114,7 +115,7 @@ export class CustomAdapter implements AgentAdapter {
     }
 
     try {
-      const subprocess = execa(this.config.binary, args, {
+      const subprocess = execa(this.config.binary, finalArgs, {
         cwd: options.cwd,
         timeout: effectiveTimeoutMs,
         cleanup: true,
