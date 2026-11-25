@@ -17,7 +17,8 @@ import { getAdapter } from "../adapters/registry.js";
 import type { UsageSnapshot } from "../adapters/agent-adapter.js";
 import { CalibrationEngine } from "../scheduler/calibration-engine.js";
 import { computeExecutionPlan } from "../scheduler/wave-planner.js";
-import { classifyTopology } from "../scheduler/quota-topology.js";
+import { classifyTopology, synthesizeFallbackBuckets } from "../scheduler/quota-topology.js";
+import { discoverAgyModels } from "../adapters/agy-adapter.js";
 import {
   installBackgroundWatcher,
   uninstallBackgroundWatcher,
@@ -42,7 +43,7 @@ async function isCommandAvailable(cmd: string): Promise<boolean> {
 }
 
 export async function runFirstRunWizard(): Promise<WetGlobalConfig> {
-  p.intro(pc.bold(pc.cyan("Welcome to WorthEveryToken (wet) v2.2.1 — Initial Setup")));
+  p.intro(pc.bold(pc.cyan("Welcome to WorthEveryToken (wet) v2.3.0 — Initial Setup")));
 
   const s = p.spinner();
   s.start("Detecting installed AI CLIs in PATH...");
@@ -129,9 +130,50 @@ export async function runFirstRunWizard(): Promise<WetGlobalConfig> {
     );
   } else {
     p.note(
-      `Topology: ${pc.magenta(topologyLabel)}\nCLI did not report an exact reset timestamp. Fallback schedule will apply (Monday 08:00).`,
-      "Fallback Schedule Configured"
+      `Topology: ${pc.magenta(topologyLabel)}\nCLI did not report an exact reset timestamp. Level 5 Zero-Bleed requires a confirmed reset day & time to avoid unconfirmed token burn.`,
+      "Reset Timestamp Not Detected Live"
     );
+
+    const confirmFallback = await p.confirm({
+      message: `Would you like to confirm a weekly reset schedule (default: ${globalConfig.schedule.fallback_weekly_reset_day.toUpperCase()} at ${globalConfig.schedule.fallback_weekly_reset_time})?`,
+      initialValue: true
+    });
+
+    if (confirmFallback && !p.isCancel(confirmFallback)) {
+      const resetDay = await p.select({
+        message: "Choose weekly subscription reset day:",
+        options: [
+          { label: "Monday (mon)", value: "mon" },
+          { label: "Tuesday (tue)", value: "tue" },
+          { label: "Wednesday (wed)", value: "wed" },
+          { label: "Thursday (thu)", value: "thu" },
+          { label: "Friday (fri)", value: "fri" },
+          { label: "Saturday (sat)", value: "sat" },
+          { label: "Sunday (sun)", value: "sun" }
+        ],
+        initialValue: globalConfig.schedule.fallback_weekly_reset_day
+      });
+      if (!p.isCancel(resetDay)) {
+        globalConfig.schedule.fallback_weekly_reset_day = resetDay as any;
+      }
+      const resetTime = await p.text({
+        message: "Enter weekly reset time (HH:MM):",
+        initialValue: globalConfig.schedule.fallback_weekly_reset_time,
+        validate: (val) =>
+          typeof val === "string" && /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/.test(val)
+            ? undefined
+            : "Please enter HH:MM format (e.g. 08:00)"
+      });
+      if (!p.isCancel(resetTime)) {
+        globalConfig.schedule.fallback_weekly_reset_time = resetTime;
+      }
+      globalConfig.schedule.fallback_schedule_confirmed = true;
+      globalConfig.schedule.auto_detect_reset = false;
+      p.note(
+        `Reset locked to every ${globalConfig.schedule.fallback_weekly_reset_day.toUpperCase()} at ${globalConfig.schedule.fallback_weekly_reset_time}. Level 5 Zero-Bleed Hard Stop armed at -${globalConfig.schedule.hard_stop_before_reset_minutes}m pre-reset.`,
+        "Fallback Schedule Confirmed ✓"
+      );
+    }
   }
 
   // Step 3: Background invisible mode
@@ -162,7 +204,7 @@ export async function runFirstRunWizard(): Promise<WetGlobalConfig> {
     }
   }
 
-  p.outro(pc.green("WorthEveryToken v2.2.1 configured successfully!"));
+  p.outro(pc.green("WorthEveryToken v2.3.0 configured successfully!"));
   return globalConfig;
 }
 
@@ -196,7 +238,11 @@ export async function runInteractiveMenu(): Promise<void> {
   const { rate: ratePer5h } = calibEngine.getRateForProvider(globalConfig.provider, globalConfig.subscription_tier);
 
   const now = new Date();
-  const topology = classifyTopology(usage?.buckets ?? []);
+  const effectiveBuckets =
+    usage?.buckets && usage.buckets.length > 0
+      ? usage.buckets
+      : synthesizeFallbackBuckets(globalConfig, now, machineState);
+  const topology = classifyTopology(effectiveBuckets);
   const plan = computeExecutionPlan({
     topology,
     calibration: {
@@ -369,6 +415,8 @@ export async function runInteractiveMenu(): Promise<void> {
         message: "What would you like to configure?",
         options: [
           { value: "provider", label: "Change active provider" },
+          { value: "model", label: "Select AI model (live discovery)" },
+          { value: "fallback_schedule", label: "Configure manual weekly reset fallback" },
           { value: "watcher_install", label: "Reinstall background watcher" },
           { value: "watcher_uninstall", label: "Remove background watcher" },
           { value: "sync_benchmarks", label: "Synchronize external benchmarks now" }
@@ -379,6 +427,69 @@ export async function runInteractiveMenu(): Promise<void> {
 
       if (settingChoice === "provider") {
         await runFirstRunWizard();
+      } else if (settingChoice === "model") {
+        const s = p.spinner();
+        s.start(`Discovering available models for ${globalConfig.provider}...`);
+        let availableModels: string[] = [];
+        if (globalConfig.provider === "agy") {
+          availableModels = await discoverAgyModels();
+        }
+        s.stop(
+          availableModels.length > 0
+            ? `Discovered ${availableModels.length} models.`
+            : "No specific models reported by provider CLI."
+        );
+
+        const modelOptions = [
+          { value: "auto", label: "auto (deterministically select top reasoning model)" },
+          ...availableModels.map((m) => ({ value: m, label: m }))
+        ];
+
+        const selectedModel = await p.select({
+          message: "Select model override:",
+          options: modelOptions,
+          initialValue: globalConfig.model_override ?? "auto"
+        });
+
+        if (!p.isCancel(selectedModel)) {
+          globalConfig.model_override = selectedModel as string;
+          saveGlobalConfig(globalConfig);
+          p.outro(`Model updated to: ${selectedModel}`);
+        }
+      } else if (settingChoice === "fallback_schedule") {
+        const resetDay = await p.select({
+          message: "Choose weekly subscription reset day:",
+          options: [
+            { label: "Monday (mon)", value: "mon" },
+            { label: "Tuesday (tue)", value: "tue" },
+            { label: "Wednesday (wed)", value: "wed" },
+            { label: "Thursday (thu)", value: "thu" },
+            { label: "Friday (fri)", value: "fri" },
+            { label: "Saturday (sat)", value: "sat" },
+            { label: "Sunday (sun)", value: "sun" }
+          ],
+          initialValue: globalConfig.schedule.fallback_weekly_reset_day
+        });
+        if (!p.isCancel(resetDay)) {
+          globalConfig.schedule.fallback_weekly_reset_day = resetDay as any;
+        }
+        const resetTime = await p.text({
+          message: "Enter weekly reset time (HH:MM):",
+          initialValue: globalConfig.schedule.fallback_weekly_reset_time,
+          validate: (val) =>
+            typeof val === "string" && /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/.test(val)
+              ? undefined
+              : "Please enter HH:MM format (e.g. 08:00)"
+        });
+        if (!p.isCancel(resetTime)) {
+          globalConfig.schedule.fallback_weekly_reset_time = resetTime;
+        }
+        globalConfig.schedule.fallback_schedule_confirmed = true;
+        globalConfig.schedule.auto_detect_reset = false;
+        saveGlobalConfig(globalConfig);
+        p.outro(
+          `Fallback reset configured: ${globalConfig.schedule.fallback_weekly_reset_day.toUpperCase()} at ${globalConfig.schedule.fallback_weekly_reset_time}`
+        );
       } else if (settingChoice === "watcher_install") {
         const res = await installBackgroundWatcher();
         p.outro(res.message);

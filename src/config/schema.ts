@@ -54,6 +54,7 @@ export type UsageSnapshot = z.infer<typeof UsageSnapshotSchema>;
 
 export const GlobalScheduleConfigSchema = z.object({
   auto_detect_reset: z.boolean().default(true),
+  fallback_schedule_confirmed: z.boolean().default(false),
   fallback_weekly_reset_day: z.enum(["mon", "tue", "wed", "thu", "fri", "sat", "sun"]).default("mon"),
   fallback_weekly_reset_time: z.string().default("08:00"),
   timezone: z.string().default("local"),

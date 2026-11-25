@@ -93,4 +93,65 @@ describe("Watcher & Overlap Prevention", () => {
     const finalState = loadMachineState();
     expect(finalState.activeRunPid).toBeNull();
   });
+
+  it("maintains FAIL_CLOSED_UNKNOWN_RESET on empty buckets when fallback schedule is unconfirmed", async () => {
+    armProject(repoDir);
+    const cfg = loadGlobalConfig();
+    saveGlobalConfig({
+      ...cfg,
+      schedule: {
+        ...cfg.schedule,
+        auto_detect_reset: true,
+        fallback_schedule_confirmed: false,
+        quiet_hours: {
+          enabled: false,
+          start: "00:00",
+          end: "23:59",
+          allow_daytime_if_expiring_within_hours: 6
+        }
+      },
+      custom_provider: {
+        binary: "echo",
+        audit_args: ["audit"],
+        exec_args: ["exec"],
+        usage_cmd: "echo No quota available",
+        use_pty: false
+      }
+    });
+
+    const result = await runWatchTick();
+    expect(result.executed).toBe(false);
+    expect(result.action).toBe("FAIL_CLOSED_UNKNOWN_RESET");
+  });
+
+  it("unlocks planning when fallback schedule is confirmed with empty live buckets", async () => {
+    armProject(repoDir);
+    const cfg = loadGlobalConfig();
+    saveGlobalConfig({
+      ...cfg,
+      schedule: {
+        ...cfg.schedule,
+        auto_detect_reset: false,
+        fallback_schedule_confirmed: true,
+        fallback_weekly_reset_day: "mon",
+        fallback_weekly_reset_time: "08:00",
+        quiet_hours: {
+          enabled: false,
+          start: "00:00",
+          end: "23:59",
+          allow_daytime_if_expiring_within_hours: 6
+        }
+      },
+      custom_provider: {
+        binary: "echo",
+        audit_args: ["audit"],
+        exec_args: ["exec"],
+        usage_cmd: "echo No quota available",
+        use_pty: false
+      }
+    });
+
+    const result = await runWatchTick();
+    expect(result.action).not.toBe("FAIL_CLOSED_UNKNOWN_RESET");
+  });
 });

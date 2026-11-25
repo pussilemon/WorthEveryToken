@@ -8,7 +8,7 @@ import {
 import { getAdapter } from "../adapters/registry.js";
 import { CalibrationEngine } from "./calibration-engine.js";
 import { computeExecutionPlan } from "./wave-planner.js";
-import { classifyTopology } from "./quota-topology.js";
+import { classifyTopology, synthesizeFallbackBuckets } from "./quota-topology.js";
 import { CycleGuard } from "./cycle-guard.js";
 import { checkUserActivity } from "./activity-guard.js";
 import { loadConfig } from "../config/loader.js";
@@ -119,28 +119,13 @@ export async function runWatchTick(): Promise<WatchTickResult> {
     detectedModel: usage.detectedModel
   };
 
-  // Determine fallback weekly reset if missing
-  let weeklyResetAt = usage.weeklyResetAt;
-  if (!weeklyResetAt) {
-    const targetDay = globalConfig.schedule.fallback_weekly_reset_day;
-    const [hStr, mStr] = globalConfig.schedule.fallback_weekly_reset_time.split(":");
-    const hour = parseInt(hStr ?? "8", 10);
-    const min = parseInt(mStr ?? "0", 10);
-    const daysMap: Record<string, number> = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
-    const dayIndex = daysMap[targetDay] ?? 1;
+  // Classify topology with fallback synthesis if buckets are empty
+  const effectiveBuckets =
+    usage.buckets.length > 0
+      ? usage.buckets
+      : synthesizeFallbackBuckets(globalConfig, now, machineState);
 
-    const fallbackDate = new Date(now);
-    fallbackDate.setHours(hour, min, 0, 0);
-    let addDays = (dayIndex - fallbackDate.getDay() + 7) % 7;
-    if (addDays === 0 && fallbackDate.getTime() <= now.getTime()) {
-      addDays = 7;
-    }
-    fallbackDate.setDate(fallbackDate.getDate() + addDays);
-    weeklyResetAt = fallbackDate;
-  }
-
-  // Classify topology
-  const topology = classifyTopology(usage.buckets);
+  const topology = classifyTopology(effectiveBuckets);
 
   // 6. Early reset check (Level 3 Zero-Bleed Guard)
   const currentResetAt = topology.primaryBucket?.resetAt

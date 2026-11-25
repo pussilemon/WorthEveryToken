@@ -31,7 +31,7 @@ export function formatHeaderBanner(options: {
   const line = pc.cyan("─".repeat(64));
   const lines: string[] = [
     line,
-    pc.bold(pc.cyan("  WorthEveryToken (wet) v2.2.1 — Zero-Bleed Autonomous Token Burner")),
+    pc.bold(pc.cyan("  WorthEveryToken (wet) v2.3.0 — Zero-Bleed Autonomous Token Burner")),
     line
   ];
 
@@ -81,7 +81,7 @@ export function formatHeaderBanner(options: {
 
     // Zero-Bleed status
     const hardStopStr = options.plan.hardStopAt ? options.plan.hardStopAt.toLocaleTimeString() : "active";
-    lines.push(`  ${pc.bold("Zero-Bleed:")}  ${pc.red(`Hard Stop at ${hardStopStr} (10m pre-reset) ✓`)}`);
+    lines.push(`  ${pc.bold("Zero-Bleed:")}  ${pc.red(`Hard Stop at ${hardStopStr} (Zero-Bleed pre-reset safeguard) ✓`)}`);
 
     if (options.plan.action === "WAIT_UNTIL_START") {
       lines.push(`              ${pc.magenta(`Scheduled start: ${options.plan.plannedStartAt.toLocaleString()}`)}`);
@@ -121,7 +121,7 @@ export function formatWaveTimelineTable(plan: WavePlan): string {
 
   lines.push(pc.dim("─".repeat(60)));
   lines.push(
-    `Zero-Bleed Hard Stop: ${pc.red(plan.hardStopAt.toLocaleTimeString())} (10 min before reset)`
+    `Zero-Bleed Hard Stop: ${pc.red(plan.hardStopAt.toLocaleTimeString())} (pre-reset safeguard)`
   );
 
   return lines.join("\n");

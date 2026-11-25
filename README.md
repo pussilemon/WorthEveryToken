@@ -27,11 +27,11 @@ Unlike rigid single-window tools, `wet` understands how modern AI subscription m
 
 ### 3. 5-Level Zero-Bleed Cycle Guard
 Five concentric safety barriers ensure your quotas are never exhausted during working hours and never spill into subsequent billing cycles:
-1. **Level 1 (Pre-Reset Hard Stop)**: Automatically halts execution 10 minutes before the billing cycle reset.
+1. **Level 1 (Pre-Reset Hard Stop)**: Automatically halts execution 20 minutes before the billing cycle reset.
 2. **Level 2 (Task-Level Pre-Flight Budget Check)**: Estimates remaining task duration against time remaining until the hard stop; skips tasks that cannot finish cleanly before cutoff.
 3. **Level 3 (Early-Reset Immediate Abort)**: Continuously checks quota reset indicators; immediately halts the wave if an unexpected early cycle reset is detected.
-4. **Level 4 (Active User Guard)**: Pauses autonomous background runs if developer activity (file edits, unstaged or staged git changes within 15 minutes) is detected on the active repository.
-5. **Level 5 (Fail-Closed Protection)**: Aborts background scheduling if quota status or reset schedule cannot be authoritatively determined.
+4. **Level 4 (Active User Guard & Off-Hours Window)**: Pauses autonomous background runs if developer activity (file edits, unstaged or staged git changes within 15 minutes) is detected on the active repository. Operates exclusively within designated off-hours (`22:00` - `08:00` and weekends) to avoid consuming tokens during daytime work (unless quota expires within 6 hours and developer is idle).
+5. **Level 5 (Fail-Closed Protection & Fallback Schedule Confirmation)**: Aborts background scheduling (`FAIL_CLOSED_UNKNOWN_RESET`) if quota status or reset schedule cannot be authoritatively determined. When using CLIs that do not expose live quota timestamps (such as `agy`), confirming your weekly reset day and time via the menu locks in `fallback_schedule_confirmed: true`, activating safe off-hours waves with strict pre-reset Hard Stop protection.
 
 ### 4. Zero-Touch Git Invisibility & Audit Isolation
 `wet` guarantees complete safety for user repositories:

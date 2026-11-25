@@ -1,5 +1,5 @@
 import pty from "node-pty";
-import { execa } from "execa";
+import { execa, execaSync } from "execa";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -21,6 +21,95 @@ export interface AgyAdapterConfig {
   extraArgs?: string[];
   wallClockTimeoutSec?: number;
   silenceWatchdogSec?: number;
+}
+
+export function parseAgyModelsOutput(rawOutput: string): string[] {
+  const ansiRegex = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+  const clean = rawOutput
+    .replace(ansiRegex, "")
+    .replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, "")
+    .replace(/Fetching available models\.\.\./g, "");
+  const lines = clean.split("\n");
+  const models: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const match = trimmed.match(/^([a-zA-Z0-9][a-zA-Z0-9_.-]+)\s+/);
+    if (match && match[1]) {
+      models.push(match[1]);
+    }
+  }
+  return models;
+}
+
+export function selectTopAgyModel(models: string[], override?: string): string | null {
+  if (override && override !== "auto") {
+    return override;
+  }
+  if (!models || models.length === 0) {
+    return null;
+  }
+
+  const scoreModel = (name: string): number => {
+    const lower = name.toLowerCase();
+    // 1. Top reasoning (xhigh / thinking / opus)
+    if (lower.includes("xhigh")) return 100;
+    if (lower.includes("thinking") && lower.includes("opus")) return 95;
+    if (lower.includes("opus")) return 90;
+    if (lower.includes("thinking")) return 88;
+
+    // 2. Flagship high (high / sonnet)
+    if (lower.includes("hydrogen-high")) return 80;
+    if (lower.includes("sonnet")) return 78;
+    if (lower.includes("high")) return 75;
+
+    // 3. Other medium / flash / low
+    if (lower.includes("medium")) return 50;
+    if (lower.includes("flash")) return 40;
+    if (lower.includes("low")) return 20;
+
+    return 10;
+  };
+
+  let bestModel: string | null = null;
+  let bestScore = -1;
+
+  for (const model of models) {
+    const score = scoreModel(model);
+    if (score > bestScore) {
+      bestScore = score;
+      bestModel = model;
+    }
+  }
+
+  return bestModel;
+}
+
+let cachedModels: string[] | null = null;
+let cachedModelsExpiresAt = 0;
+
+export function clearAgyModelsCache(): void {
+  cachedModels = null;
+  cachedModelsExpiresAt = 0;
+}
+
+export async function discoverAgyModels(binary = "agy"): Promise<string[]> {
+  const now = Date.now();
+  if (cachedModels && now < cachedModelsExpiresAt) {
+    return cachedModels;
+  }
+  try {
+    const { stdout } = await execa(binary, ["models"], { timeout: 10000 });
+    const models = parseAgyModelsOutput(stdout);
+    if (models.length > 0) {
+      cachedModels = models;
+      cachedModelsExpiresAt = now + 60 * 60 * 1000;
+      return models;
+    }
+  } catch (err) {
+    logger.debug({ err }, "Failed to discover models via agy models");
+  }
+  return cachedModels ?? [];
 }
 
 export function normalizeAgyOutput(rawOutput: string): string {
@@ -97,54 +186,109 @@ export class AgyAdapter implements AgentAdapter {
     }
   }
 
+  public async discoverTopModel(override?: string): Promise<string | null> {
+    const models = await discoverAgyModels(this.binary);
+    return selectTopAgyModel(models, override);
+  }
+
   public getTopModelProfile(config: WetGlobalConfig): { model: string; effort?: string; extraFlags: string[] } {
-    const model = config.model_override && config.model_override !== "auto" ? config.model_override : "auto";
+    const override = config.model_override;
+    let resolvedModel: string | null = null;
+
+    if (override && override !== "auto") {
+      resolvedModel = override;
+    } else if (cachedModels && cachedModels.length > 0) {
+      resolvedModel = selectTopAgyModel(cachedModels, override);
+    } else {
+      try {
+        const { stdout } = execaSync(this.binary, ["models"], { timeout: 4000 });
+        const models = parseAgyModelsOutput(stdout);
+        if (models.length > 0) {
+          cachedModels = models;
+          cachedModelsExpiresAt = Date.now() + 60 * 60 * 1000;
+          resolvedModel = selectTopAgyModel(models, override);
+        }
+      } catch {
+        // Fallback to null
+      }
+    }
+
+    const model = resolvedModel ?? "auto";
     const effort = config.reasoning_effort ?? "max";
-    return { model, effort, extraFlags: [] };
+    const extraFlags: string[] = ["--effort", effort];
+    return { model, effort, extraFlags };
   }
 
   public async probeUsage(): Promise<UsageSnapshot> {
     const startTime = Date.now();
-    let snippet = "";
-    try {
-      const { stdout } = await execa(this.binary, ["status"], { timeout: 8000 });
-      snippet = stdout;
-    } catch {
-      // Fallback
-    }
-    const parsed = parseUsageText(snippet);
+    // agy 1.5.17 does not support 'status' or native usage inspection commands.
+    // Instantaneous, non-failing fallback snapshot:
     return {
       provider: "agy",
       probedAt: new Date(startTime),
-      source: parsed.weeklyUsedPct !== null ? "cli_probe" : "fallback_manual",
-      buckets: parsed.buckets,
-      weeklyUsedPct: parsed.weeklyUsedPct,
-      weeklyResetAt: parsed.weeklyResetAt,
-      window5hUsedPct: parsed.window5hUsedPct,
-      window5hResetAt: parsed.window5hResetAt,
-      rawSnippet: snippet.slice(0, 300)
+      source: "fallback_manual",
+      buckets: [],
+      weeklyUsedPct: null,
+      weeklyResetAt: null,
+      window5hUsedPct: null,
+      window5hResetAt: null,
+      rawSnippet: ""
     };
   }
 
   public async runAudit(prompt: string, workdir: string, options: AgentExecutionOptions = {}): Promise<ExecutionResult> {
+    const extraFlags = [...(options.extraFlags ?? [])];
+    if (!extraFlags.includes("--mode")) {
+      extraFlags.push("--mode", "plan");
+    }
+    // Filter out --dangerously-skip-permissions and --mode accept-edits if present
+    const filteredFlags: string[] = [];
+    for (let i = 0; i < extraFlags.length; i++) {
+      const f = extraFlags[i]!;
+      if (f === "--dangerously-skip-permissions") continue;
+      if (f === "--mode" && extraFlags[i + 1] === "accept-edits") {
+        filteredFlags.push("--mode", "plan");
+        i++;
+        continue;
+      }
+      filteredFlags.push(f);
+    }
+
     return this.execute(prompt, {
       ...options,
+      extraFlags: filteredFlags,
       cwd: workdir,
       phase: "audit"
     });
   }
 
   public async runTask(prompt: string, workdir: string, options: AgentExecutionOptions = {}): Promise<ExecutionResult> {
+    const extraFlags = [...(options.extraFlags ?? [])];
+    if (!extraFlags.includes("--mode")) {
+      extraFlags.push("--mode", "accept-edits");
+    }
+    if (!extraFlags.includes("--dangerously-skip-permissions")) {
+      extraFlags.push("--dangerously-skip-permissions");
+    }
     return this.execute(prompt, {
       ...options,
+      extraFlags,
       cwd: workdir,
       phase: "execute"
     });
   }
 
   public async runRepair(prompt: string, workdir: string, options: AgentExecutionOptions = {}): Promise<ExecutionResult> {
+    const extraFlags = [...(options.extraFlags ?? [])];
+    if (!extraFlags.includes("--mode")) {
+      extraFlags.push("--mode", "accept-edits");
+    }
+    if (!extraFlags.includes("--dangerously-skip-permissions")) {
+      extraFlags.push("--dangerously-skip-permissions");
+    }
     return this.execute(prompt, {
       ...options,
+      extraFlags,
       cwd: workdir,
       phase: "repair"
     });
@@ -155,6 +299,9 @@ export class AgyAdapter implements AgentAdapter {
     const args = ["-p", prompt, ...this.extraArgs, ...(options.extraFlags ?? [])];
     if (options.model && options.model !== "auto") {
       args.push("--model", options.model);
+    }
+    if (!args.includes("--effort")) {
+      args.push("--effort", "max");
     }
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
@@ -411,11 +558,32 @@ export class AgyAdapter implements AgentAdapter {
         };
       }
 
-      if (exitCode === 0 && signal.status === "DONE" && digest !== null) {
+      if (exitCode === 0 && signal.status === "DONE") {
+        const phase = options.phase ?? "execute";
+        if (phase === "audit" || phase === "repair" || digest !== null) {
+          return {
+            exitCode: 0,
+            status: "DONE",
+            digest,
+            output: normalized,
+            metrics: { durationMs }
+          };
+        }
+
+        // Phase === "execute" with missing digest: provide synthetic fallback
+        logger.warn(
+          { taskId: options.taskId },
+          "Agy finished with status=DONE but missing <WET_DIGEST>. Generating synthetic fallback digest."
+        );
         return {
           exitCode: 0,
           status: "DONE",
-          digest,
+          digest: {
+            files_changed: [],
+            summary: "Completed without structured digest",
+            tests_added: 0,
+            risks: []
+          },
           output: normalized,
           metrics: { durationMs }
         };

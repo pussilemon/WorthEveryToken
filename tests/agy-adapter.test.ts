@@ -2,7 +2,12 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { AgyAdapter, normalizeAgyOutput } from "../src/adapters/agy-adapter.js";
+import {
+  AgyAdapter,
+  normalizeAgyOutput,
+  parseAgyModelsOutput,
+  selectTopAgyModel
+} from "../src/adapters/agy-adapter.js";
 import { parseExitSignal, parseDigest } from "../src/adapters/agent-adapter.js";
 
 describe("AgyAdapter", () => {
@@ -121,5 +126,120 @@ exit 0
 
     const repairResult = await adapter.runRepair("Run repair", tmpDir);
     expect(repairResult.status).toBe("DONE");
+  });
+
+  it("should invoke runAudit() with --mode plan and strictly exclude write permissions", async () => {
+    const argLogPath = path.join(tmpDir, "args-audit.log");
+    const spyScript = path.join(tmpDir, "mock-spy-audit.sh");
+    fs.writeFileSync(
+      spyScript,
+      `#!/bin/bash
+echo "$@" > "${argLogPath}"
+echo '<WET_EXIT_SIGNAL status="DONE"/>'
+exit 0
+`,
+      { mode: 0o755 }
+    );
+
+    const adapter = new AgyAdapter({
+      binary: spyScript,
+      usePty: false
+    });
+
+    const result = await adapter.runAudit("Analyze repo", tmpDir, {
+      model: "gemini-4-hydrogen-xhigh",
+      extraFlags: ["--effort", "max"]
+    });
+
+    expect(result.status).toBe("DONE");
+    const recordedArgs = fs.readFileSync(argLogPath, "utf-8");
+    expect(recordedArgs).toContain("--mode plan");
+    expect(recordedArgs).not.toContain("--dangerously-skip-permissions");
+    expect(recordedArgs).not.toContain("accept-edits");
+    expect(recordedArgs).toContain("--model gemini-4-hydrogen-xhigh");
+  });
+
+  it("should invoke runTask() and runRepair() with --mode accept-edits and --dangerously-skip-permissions", async () => {
+    const argLogPath = path.join(tmpDir, "args-task.log");
+    const spyScript = path.join(tmpDir, "mock-spy-task.sh");
+    fs.writeFileSync(
+      spyScript,
+      `#!/bin/bash
+echo "$@" > "${argLogPath}"
+echo '<WET_DIGEST>{"files_changed": ["src/fix.ts"], "summary": "Fixed", "tests_added": 1, "risks": []}</WET_DIGEST>'
+echo '<WET_EXIT_SIGNAL status="DONE"/>'
+exit 0
+`,
+      { mode: 0o755 }
+    );
+
+    const adapter = new AgyAdapter({
+      binary: spyScript,
+      usePty: false
+    });
+
+    const result = await adapter.runTask("Fix bug", tmpDir, {
+      model: "gemini-4-hydrogen-xhigh",
+      extraFlags: ["--effort", "max"]
+    });
+
+    expect(result.status).toBe("DONE");
+    const recordedArgs = fs.readFileSync(argLogPath, "utf-8");
+    expect(recordedArgs).toContain("--mode accept-edits");
+    expect(recordedArgs).toContain("--dangerously-skip-permissions");
+    expect(recordedArgs).toContain("--effort max");
+    expect(recordedArgs).toContain("--model gemini-4-hydrogen-xhigh");
+
+    const repairLogPath = path.join(tmpDir, "args-repair.log");
+    const spyRepairScript = path.join(tmpDir, "mock-spy-repair.sh");
+    fs.writeFileSync(
+      spyRepairScript,
+      `#!/bin/bash
+echo "$@" > "${repairLogPath}"
+echo '<WET_EXIT_SIGNAL status="DONE"/>'
+exit 0
+`,
+      { mode: 0o755 }
+    );
+    const repairAdapter = new AgyAdapter({ binary: spyRepairScript, usePty: false });
+    const repairResult = await repairAdapter.runRepair("Repair build", tmpDir, {
+      model: "gemini-4-hydrogen-xhigh"
+    });
+    expect(repairResult.status).toBe("DONE");
+    const recordedRepairArgs = fs.readFileSync(repairLogPath, "utf-8");
+    expect(recordedRepairArgs).toContain("--mode accept-edits");
+    expect(recordedRepairArgs).toContain("--dangerously-skip-permissions");
+    expect(recordedRepairArgs).toContain("--model gemini-4-hydrogen-xhigh");
+  });
+
+  it("should parse agy models output and deterministically select top reasoning model", () => {
+    const rawOutput = `
+⠋ Fetching available models...⠙ Fetching available models...
+gemini-4-hydrogen-high    Gemini 4 Hydrogen (High)
+gemini-4-hydrogen-xhigh   Gemini 4 Hydrogen (XHigh)
+gemini-4-hydrogen-medium  Gemini 4 Hydrogen (Medium)
+gemini-4-hydrogen-low     Gemini 4 Hydrogen (Low)
+gemini-3.8-flash-high     Gemini 3.8 Flash (High)
+gemini-3.8-flash-medium   Gemini 3.8 Flash (Medium)
+gemini-3.8-flash-low      Gemini 3.8 Flash (Low)
+claude-sonnet-4-6         Claude Sonnet 4.6 (Thinking)
+claude-opus-4-6-thinking  Claude Opus 4.6 (Thinking)
+gpt-oss-120b-medium       GPT-OSS 120B (Medium)
+`;
+    const models = parseAgyModelsOutput(rawOutput);
+    expect(models).toContain("gemini-4-hydrogen-xhigh");
+    expect(models).toContain("claude-opus-4-6-thinking");
+    expect(models).toContain("gemini-3.8-flash-high");
+
+    // Top choice should be highest reasoning model: gemini-4-hydrogen-xhigh
+    const top = selectTopAgyModel(models);
+    expect(top).toBe("gemini-4-hydrogen-xhigh");
+
+    // When xhigh is absent, claude-opus-4-6-thinking should be selected
+    const withoutXhigh = models.filter((m) => !m.includes("xhigh"));
+    expect(selectTopAgyModel(withoutXhigh)).toBe("claude-opus-4-6-thinking");
+
+    // Override must always be respected
+    expect(selectTopAgyModel(models, "claude-sonnet-4-6")).toBe("claude-sonnet-4-6");
   });
 });

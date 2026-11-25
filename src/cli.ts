@@ -21,7 +21,7 @@ import {
 import { getAdapter } from "./adapters/registry.js";
 import { CalibrationEngine } from "./scheduler/calibration-engine.js";
 import { computeExecutionPlan } from "./scheduler/wave-planner.js";
-import { classifyTopology } from "./scheduler/quota-topology.js";
+import { classifyTopology, synthesizeFallbackBuckets } from "./scheduler/quota-topology.js";
 import {
   installBackgroundWatcher,
   uninstallBackgroundWatcher,
@@ -36,8 +36,8 @@ const program = new Command();
 
 program
   .name("wet")
-  .description("WorthEveryToken (wet) v2.2.1 — Autonomous Multi-Cycle Token Burner & Quota Optimizer")
-  .version("2.2.1");
+  .description("WorthEveryToken (wet) v2.3.0 — Autonomous Multi-Cycle Token Burner & Quota Optimizer")
+  .version("2.3.0");
 
 // 1. Interactive TUI default when no args are passed
 if (process.argv.length <= 2) {
@@ -118,7 +118,12 @@ if (process.argv.length <= 2) {
         );
 
         const now = new Date();
-        const topology = classifyTopology(usage.buckets);
+        const machineState = loadMachineState();
+        const effectiveBuckets =
+          usage.buckets.length > 0
+            ? usage.buckets
+            : synthesizeFallbackBuckets(globalConfig, now, machineState);
+        const topology = classifyTopology(effectiveBuckets);
         const plan = computeExecutionPlan({
           topology,
           calibration: {
@@ -135,7 +140,15 @@ if (process.argv.length <= 2) {
           now
         });
 
-        console.log("\n" + formatUsageReport(usage));
+        const displayUsage = {
+          ...usage,
+          buckets: effectiveBuckets,
+          weeklyResetAt:
+            usage.weeklyResetAt ??
+            (topology.primaryBucket?.resetAt ? new Date(topology.primaryBucket.resetAt) : null)
+        };
+
+        console.log("\n" + formatUsageReport(displayUsage));
         console.log(`\n• Detected topology: ${topology.type}`);
         console.log(`• Rate/window calibration: ${weeklyPctPer5hWave}% (source: ${source})`);
         console.log(`• Detected top model: ${topModel.model}`);

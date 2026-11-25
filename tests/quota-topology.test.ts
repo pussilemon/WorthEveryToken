@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { classifyTopology, getPrimaryRemainingPct } from "../src/scheduler/quota-topology.js";
+import {
+  classifyTopology,
+  getPrimaryRemainingPct,
+  synthesizeFallbackBuckets,
+  calculateNextFallbackReset
+} from "../src/scheduler/quota-topology.js";
 import { computeExecutionPlan } from "../src/scheduler/wave-planner.js";
 import { classifyRateLimitError } from "../src/scheduler/calibration-engine.js";
 import type { QuotaBucket } from "../src/config/schema.js";
@@ -397,6 +402,128 @@ describe("QuotaTopology Engine", () => {
       const longReset = new Date("2026-11-23T12:00:00Z"); // 72 hours later
       const r2 = classifyRateLimitError("Quota cap reached.", longReset, now);
       expect(r2.type).toBe("PRIMARY_QUOTA_EXHAUSTED");
+    });
+  });
+
+  describe("synthesizeFallbackBuckets & Fallback Scheduling", () => {
+    const baseConfig = {
+      provider: "agy" as const,
+      subscription_tier: "pro" as const,
+      model_override: "auto",
+      reasoning_effort: "max" as const,
+      schedule: {
+        auto_detect_reset: true,
+        fallback_schedule_confirmed: false,
+        fallback_weekly_reset_day: "mon" as const,
+        fallback_weekly_reset_time: "08:00",
+        timezone: "local",
+        window_hours: 5,
+        target_weekly_burn_pct: 99,
+        wave_buffer_minutes: 15,
+        hard_stop_before_reset_minutes: 20,
+        min_task_reserve_minutes: 6,
+        user_idle_minutes: 15,
+        quiet_hours: {
+          enabled: true,
+          start: "22:00",
+          end: "08:00",
+          allow_daytime_if_expiring_within_hours: 6
+        },
+        watcher_interval_minutes: 15
+      },
+      execution: {
+        max_parallel_workers: 1,
+        max_tasks_per_audit: 25,
+        max_audit_passes_per_cycle: 3,
+        max_retries_per_task: 3,
+        max_consecutive_failures: 3,
+        task_timeout_sec: 300,
+        silence_watchdog_sec: 90
+      },
+      calibration: {
+        sync_external_benchmarks: true,
+        benchmark_source_url: "https://aicodingdaily.com/subscription-usage",
+        benchmark_cache_ttl_hours: 168,
+        ema_alpha: 0.4
+      }
+    };
+
+    it("should calculate correct next fallback reset date", () => {
+      const wednesday = new Date("2026-11-25T12:00:00Z");
+      const nextMon = calculateNextFallbackReset(wednesday, "mon", "08:00");
+      expect(nextMon.getDay()).toBe(1); // Monday
+      expect(nextMon.getHours()).toBe(8);
+      expect(nextMon.getMinutes()).toBe(0);
+      expect(nextMon.getTime()).toBeGreaterThan(wednesday.getTime());
+    });
+
+    it("should return [] and maintain FAIL_CLOSED_UNKNOWN_RESET when unconfirmed and auto_detect is true", () => {
+      const now = new Date("2026-11-25T12:00:00Z");
+      const unconfirmedConfig = { ...baseConfig };
+      const buckets = synthesizeFallbackBuckets(unconfirmedConfig, now, null);
+      expect(buckets).toEqual([]);
+
+      const topology = classifyTopology(buckets);
+      expect(topology.type).toBe("UNKNOWN");
+
+      const plan = computeExecutionPlan({
+        topology,
+        calibration: { primaryPctPerSubWindow: 12 },
+        config: {
+          targetWeeklyBurnPct: 99,
+          windowHours: 5,
+          waveBufferMinutes: 15,
+          hardStopBeforeResetMinutes: 20,
+          minTaskReserveMinutes: 6,
+          quietHours: baseConfig.schedule.quiet_hours
+        },
+        now
+      });
+      expect(plan.action).toBe("FAIL_CLOSED_UNKNOWN_RESET");
+    });
+
+    it("should synthesize TWO_TIER_WINDOW with strict pre-reset hard stop when confirmed", () => {
+      const now = new Date("2026-11-25T12:00:00Z");
+      const confirmedConfig = {
+        ...baseConfig,
+        schedule: {
+          ...baseConfig.schedule,
+          auto_detect_reset: false,
+          fallback_schedule_confirmed: true,
+          fallback_weekly_reset_day: "mon" as const,
+          fallback_weekly_reset_time: "08:00"
+        }
+      };
+
+      const buckets = synthesizeFallbackBuckets(confirmedConfig, now, null);
+      expect(buckets.length).toBe(2);
+
+      const topology = classifyTopology(buckets);
+      expect(topology.type).toBe("TWO_TIER_WINDOW");
+      expect(topology.primaryBucket).not.toBeNull();
+      expect(topology.primaryBucket?.id).toBe("fallback_weekly");
+      expect(topology.subWindowBucket?.id).toBe("fallback_sub_window");
+
+      const plan = computeExecutionPlan({
+        topology,
+        calibration: { primaryPctPerSubWindow: 12 },
+        config: {
+          targetWeeklyBurnPct: 99,
+          windowHours: 5,
+          waveBufferMinutes: 15,
+          hardStopBeforeResetMinutes: 20,
+          minTaskReserveMinutes: 6,
+          quietHours: confirmedConfig.schedule.quiet_hours
+        },
+        now
+      });
+
+      expect(plan.action).not.toBe("FAIL_CLOSED_UNKNOWN_RESET");
+      expect(plan.hardStopAt).toBeDefined();
+
+      const resetTime = new Date(topology.primaryBucket!.resetAt!).getTime();
+      const expectedHardStop = resetTime - 20 * 60 * 1000;
+      expect(plan.hardStopAt.getTime()).toBe(expectedHardStop);
     });
   });
 });

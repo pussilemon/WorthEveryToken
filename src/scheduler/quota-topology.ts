@@ -1,6 +1,8 @@
 import {
   type QuotaBucket,
   type QuotaTopologyType,
+  type WetGlobalConfig,
+  type MachineState,
   QuotaBucketSchema,
   QuotaTopologyTypeSchema
 } from "../config/schema.js";
@@ -142,3 +144,81 @@ export function getPrimaryRemainingPct(topology: QuotaTopology, targetBurn = 99)
   }
   return 0;
 }
+
+export function calculateNextFallbackReset(
+  now: Date,
+  targetDay: "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun" = "mon",
+  timeStr = "08:00",
+  _timezone = "local"
+): Date {
+  const [hStr, mStr] = timeStr.split(":");
+  const hour = parseInt(hStr ?? "8", 10);
+  const min = parseInt(mStr ?? "0", 10);
+  const daysMap: Record<string, number> = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+  const dayIndex = daysMap[targetDay] ?? 1;
+
+  const fallbackDate = new Date(now);
+  fallbackDate.setHours(hour, min, 0, 0);
+  let addDays = (dayIndex - fallbackDate.getDay() + 7) % 7;
+  if (addDays === 0 && fallbackDate.getTime() <= now.getTime()) {
+    addDays = 7;
+  }
+  fallbackDate.setDate(fallbackDate.getDate() + addDays);
+  return fallbackDate;
+}
+
+export function synthesizeFallbackBuckets(
+  config: WetGlobalConfig,
+  now: Date,
+  state?: MachineState | null
+): QuotaBucket[] {
+  // Fail-closed rule: if auto_detect_reset is true AND fallback_schedule_confirmed is false,
+  // return [] so Level 5 FAIL_CLOSED_UNKNOWN_RESET continues to block unconfirmed starts.
+  if (config.schedule.auto_detect_reset && !config.schedule.fallback_schedule_confirmed) {
+    return [];
+  }
+
+  // User confirmed fallback schedule:
+  const fallbackResetAt = calculateNextFallbackReset(
+    now,
+    config.schedule.fallback_weekly_reset_day,
+    config.schedule.fallback_weekly_reset_time,
+    config.schedule.timezone
+  );
+
+  const estimatedUsedPct =
+    state?.activeProject?.cyclePeakUsedPct ??
+    state?.activeProject?.lastWaveWeeklyPctBefore ??
+    0;
+
+  const buckets: QuotaBucket[] = [
+    {
+      id: "fallback_weekly",
+      role: "primary",
+      scope: "account",
+      model: null,
+      windowType: "fixed",
+      durationHours: 168,
+      usedPct: estimatedUsedPct,
+      resetAt: fallbackResetAt.toISOString(),
+      confidence: "medium"
+    }
+  ];
+
+  if (config.schedule.window_hours > 0) {
+    buckets.push({
+      id: "fallback_sub_window",
+      role: "sub_window",
+      scope: "account",
+      model: null,
+      windowType: "rolling",
+      durationHours: config.schedule.window_hours,
+      usedPct: 0,
+      resetAt: null,
+      confidence: "medium"
+    });
+  }
+
+  return buckets;
+}
+
