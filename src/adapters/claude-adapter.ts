@@ -113,6 +113,7 @@ export class ClaudeAdapter implements AgentAdapter {
         provider: "claude",
         probedAt: new Date(startTime),
         source: "cli_probe",
+        buckets: parsed.buckets,
         weeklyUsedPct: parsed.weeklyUsedPct,
         weeklyResetAt: parsed.weeklyResetAt,
         window5hUsedPct: parsed.window5hUsedPct,
@@ -136,6 +137,19 @@ export class ClaudeAdapter implements AgentAdapter {
         provider: "claude",
         probedAt: new Date(startTime),
         source: "local_logs",
+        buckets: [
+          {
+            id: "rolling_5h",
+            role: "sub_window",
+            scope: "account",
+            model: null,
+            windowType: "rolling",
+            durationHours: 5,
+            usedPct: window5hPct,
+            resetAt: null,
+            confidence: "medium"
+          }
+        ],
         weeklyUsedPct: null,
         weeklyResetAt: null,
         window5hUsedPct: window5hPct,
@@ -147,6 +161,7 @@ export class ClaudeAdapter implements AgentAdapter {
         provider: "claude",
         probedAt: new Date(startTime),
         source: "fallback_manual",
+        buckets: [],
         weeklyUsedPct: null,
         weeklyResetAt: null,
         window5hUsedPct: null,
@@ -234,10 +249,28 @@ export class ClaudeAdapter implements AgentAdapter {
       }
     };
 
+    const taskTimeoutMs = (options.timeoutSec ?? 300) * 1000;
+    let effectiveTimeoutMs = taskTimeoutMs;
+    if (options.deadlineAt) {
+      const remainingUntilDeadline = options.deadlineAt.getTime() - Date.now();
+      if (remainingUntilDeadline <= 0) {
+        return {
+          exitCode: 124,
+          status: "FAILED",
+          digest: null,
+          output: "",
+          error: "Process not started: hard deadline already expired",
+          metrics: { durationMs: 0 }
+        };
+      }
+      effectiveTimeoutMs = Math.min(taskTimeoutMs, remainingUntilDeadline);
+    }
+
     try {
       const subprocess = execa(this.binary, args, {
         cwd: options.cwd,
-        timeout: options.timeoutSec ? options.timeoutSec * 1000 : undefined,
+        timeout: effectiveTimeoutMs,
+        cleanup: true,
         env: {
           ...process.env,
           CI: "1"

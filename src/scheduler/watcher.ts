@@ -7,7 +7,10 @@ import {
 } from "../config/global-store.js";
 import { getAdapter } from "../adapters/registry.js";
 import { CalibrationEngine } from "./calibration-engine.js";
-import { computeWavePlan } from "./wave-planner.js";
+import { computeExecutionPlan } from "./wave-planner.js";
+import { classifyTopology } from "./quota-topology.js";
+import { CycleGuard } from "./cycle-guard.js";
+import { checkUserActivity } from "./activity-guard.js";
 import { loadConfig } from "../config/loader.js";
 import { Orchestrator } from "../core/orchestrator.js";
 import { logger } from "../utils/logger.js";
@@ -30,6 +33,7 @@ export function isPidAlive(pid: number): boolean {
 export async function runWatchTick(): Promise<WatchTickResult> {
   const globalConfig = loadGlobalConfig();
   const machineState = loadMachineState();
+  const now = new Date();
 
   // 1. Guard: no active project
   if (!machineState.activeProject) {
@@ -45,7 +49,40 @@ export async function runWatchTick(): Promise<WatchTickResult> {
     return { executed: false, action: "PAUSED", reason: "Project paused" };
   }
 
-  // 3. Guard: check if an active run PID is already alive
+  // 3. Silent auto-renewal: if completed_cycle and lockedCycleResetAt + 30m has passed, auto-arm for next cycle
+  if (activeProject.status === "completed_cycle") {
+    if (activeProject.lockedCycleResetAt) {
+      const renewTime = new Date(activeProject.lockedCycleResetAt).getTime() + 30 * 60_000;
+      if (now.getTime() >= renewTime) {
+        logger.info(
+          { project: activeProject.repoName },
+          "Cycle reset passed by +30m. Silently auto-renewing project to 'armed' for new cycle."
+        );
+        updateActiveProject({
+          status: "armed",
+          lockedCycleResetAt: null,
+          cyclePeakUsedPct: null,
+          auditPassCount: 0,
+          nextWakeAt: null
+        });
+        activeProject.status = "armed";
+      } else {
+        return {
+          executed: false,
+          action: "CYCLE_COMPLETED",
+          reason: "Cycle completed. Standing by until new cycle starts."
+        };
+      }
+    } else {
+      return {
+        executed: false,
+        action: "CYCLE_COMPLETED",
+        reason: "Cycle completed."
+      };
+    }
+  }
+
+  // 4. Guard: check if an active run PID is already alive
   if (machineState.activeRunPid !== null) {
     if (isPidAlive(machineState.activeRunPid)) {
       logger.info(
@@ -63,18 +100,18 @@ export async function runWatchTick(): Promise<WatchTickResult> {
     }
   }
 
-  // 4. Instantiate universal adapter and probe usage
+  // 5. Instantiate universal adapter and probe usage
   const adapter = getAdapter(globalConfig.provider, globalConfig);
   logger.info({ provider: globalConfig.provider }, "Probing provider usage for scheduled wave check...");
 
   const usage = await adapter.probeUsage();
-  const now = new Date();
 
   // Record usage snapshot in machine state
   machineState.lastKnownUsage = {
     provider: usage.provider,
     probedAt: usage.probedAt.toISOString(),
     source: usage.source,
+    buckets: usage.buckets,
     weeklyUsedPct: usage.weeklyUsedPct,
     weeklyResetAt: usage.weeklyResetAt ? usage.weeklyResetAt.toISOString() : null,
     window5hUsedPct: usage.window5hUsedPct,
@@ -82,10 +119,9 @@ export async function runWatchTick(): Promise<WatchTickResult> {
     detectedModel: usage.detectedModel
   };
 
-  // Determine weekly reset timestamp
+  // Determine fallback weekly reset if missing
   let weeklyResetAt = usage.weeklyResetAt;
   if (!weeklyResetAt) {
-    // Fallback calculation using schedule config
     const targetDay = globalConfig.schedule.fallback_weekly_reset_day;
     const [hStr, mStr] = globalConfig.schedule.fallback_weekly_reset_time.split(":");
     const hour = parseInt(hStr ?? "8", 10);
@@ -103,7 +139,48 @@ export async function runWatchTick(): Promise<WatchTickResult> {
     weeklyResetAt = fallbackDate;
   }
 
-  // 5. Get rate from Calibration Engine
+  // Classify topology
+  const topology = classifyTopology(usage.buckets);
+
+  // 6. Early reset check (Level 3 Zero-Bleed Guard)
+  const currentResetAt = topology.primaryBucket?.resetAt
+    ? new Date(topology.primaryBucket.resetAt)
+    : (usage.weeklyResetAt ?? null);
+  const currentUsedPct = topology.primaryBucket?.usedPct ?? usage.weeklyUsedPct ?? null;
+
+  const earlyReset = CycleGuard.checkEarlyReset({
+    lockedCycleResetAt: activeProject.lockedCycleResetAt ? new Date(activeProject.lockedCycleResetAt) : null,
+    cyclePeakUsedPct: activeProject.cyclePeakUsedPct,
+    currentResetAt,
+    currentUsedPct,
+    now
+  });
+
+  if (earlyReset.abort) {
+    logger.warn({ reason: earlyReset.reason }, "Early cycle reset detected! Halting wave execution.");
+    updateActiveProject({
+      status: "completed_cycle",
+      nextWakeAt: null
+    });
+    return { executed: false, action: "EARLY_RESET_DETECTED_ABORT", reason: earlyReset.reason ?? "Early reset" };
+  }
+
+  // 7. User Activity Guard (Fase 4.1)
+  let hoursUntilReset: number | null = null;
+  if (currentResetAt) {
+    hoursUntilReset = Math.max(0, (currentResetAt.getTime() - now.getTime()) / 3600_000);
+  }
+
+  const activity = await checkUserActivity(activeProject.repoPath, globalConfig.provider, globalConfig, hoursUntilReset);
+  if (activity.active) {
+    logger.info({ reason: activity.reason }, "User activity detected. Yielding execution quietly.");
+    updateActiveProject({
+      status: "yielded_to_user"
+    });
+    return { executed: false, action: "YIELDED_TO_USER", reason: activity.reason ?? "User active" };
+  }
+
+  // 8. Calibration & Execution Plan
   const calibrationEngine = new CalibrationEngine();
   if (globalConfig.calibration.sync_external_benchmarks) {
     await calibrationEngine.syncExternalBenchmarks(
@@ -112,33 +189,39 @@ export async function runWatchTick(): Promise<WatchTickResult> {
     );
   }
 
-  const { rate: weeklyPctPer5hWave } = calibrationEngine.getRateForProvider(
+  const { rate: primaryPctPerSubWindow } = calibrationEngine.getRateForProvider(
     globalConfig.provider,
     globalConfig.subscription_tier
   );
 
-  // 6. Compute wave plan
-  const plan = computeWavePlan({
-    now,
-    weeklyUsedPct: usage.weeklyUsedPct ?? 0,
-    weeklyResetAt,
-    window5hUsedPct: usage.window5hUsedPct,
-    window5hResetAt: usage.window5hResetAt,
-    weeklyPctPer5hWave,
+  const plan = computeExecutionPlan({
+    topology,
+    calibration: {
+      primaryPctPerSubWindow,
+      primaryPctPerHour: 4
+    },
     config: {
       targetWeeklyBurnPct: globalConfig.schedule.target_weekly_burn_pct,
       windowHours: globalConfig.schedule.window_hours,
       waveBufferMinutes: globalConfig.schedule.wave_buffer_minutes,
-      hardStopBeforeResetMinutes: globalConfig.schedule.hard_stop_before_reset_minutes
-    }
+      hardStopBeforeResetMinutes: globalConfig.schedule.hard_stop_before_reset_minutes,
+      minTaskReserveMinutes: globalConfig.schedule.min_task_reserve_minutes,
+      quietHours: globalConfig.schedule.quiet_hours
+    },
+    now
   });
 
   logger.info(
-    { action: plan.action, wavesNeeded: plan.wavesNeeded, summary: plan.summary },
-    "Wave planner assessment"
+    { action: plan.action, wavesNeeded: plan.wavesNeeded, summary: plan.summary, topology: topology.type },
+    "Adaptive execution plan assessment"
   );
 
-  // Handle plan actions
+  // Level 5 Fail-Closed handling
+  if (plan.action === "FAIL_CLOSED_UNKNOWN_RESET") {
+    logger.warn({ summary: plan.summary }, "Fail-closed enforced: standing by without burning tokens");
+    return { executed: false, action: "FAIL_CLOSED_UNKNOWN_RESET", reason: plan.summary };
+  }
+
   if (plan.action === "WAIT_UNTIL_START" || plan.action === "WAIT_WINDOW_UNLOCK") {
     updateActiveProject({
       nextWakeAt: plan.nextWakeAt ? plan.nextWakeAt.toISOString() : null,
@@ -158,14 +241,19 @@ export async function runWatchTick(): Promise<WatchTickResult> {
   }
 
   // START_WAVE_NOW
-  logger.info({ project: activeProject.repoPath }, "Starting scheduled wave execution!");
+  logger.info({ project: activeProject.repoPath, model: plan.selectedModel }, "Starting scheduled wave execution!");
   machineState.activeRunPid = process.pid;
   saveMachineState(machineState);
+
+  const lockedResetAt = activeProject.lockedCycleResetAt ?? (currentResetAt ? currentResetAt.toISOString() : null);
+  const newPeakPct = Math.max(activeProject.cyclePeakUsedPct ?? 0, currentUsedPct ?? 0);
 
   updateActiveProject({
     status: "running_wave",
     lastWaveStartedAt: new Date().toISOString(),
-    lastWaveWeeklyPctBefore: usage.weeklyUsedPct
+    lastWaveWeeklyPctBefore: usage.weeklyUsedPct,
+    lockedCycleResetAt: lockedResetAt,
+    cyclePeakUsedPct: newPeakPct
   });
 
   try {
@@ -184,7 +272,6 @@ export async function runWatchTick(): Promise<WatchTickResult> {
     logger.info({ outcome: waveResult.outcome, reason: waveResult.stopReason }, "Wave execution finished");
 
     if (waveResult.outcome === "RATE_LIMITED_5H") {
-      // Probe usage again to observe consumed delta
       const postUsage = await adapter.probeUsage();
       if (
         usage.weeklyUsedPct !== null &&
@@ -203,10 +290,18 @@ export async function runWatchTick(): Promise<WatchTickResult> {
         ? new Date(postUsage.window5hResetAt.getTime() + 2 * 60_000)
         : new Date(Date.now() + 5 * 3600_000 + 2 * 60_000);
 
-      updateActiveProject({
-        status: "waiting_window_reset",
-        nextWakeAt: nextWake.toISOString()
-      });
+      // Level 4 Defense: Check if next wake straddles hard stop
+      if (!CycleGuard.shouldScheduleWakeup(nextWake, plan.hardStopAt)) {
+        updateActiveProject({
+          status: "completed_cycle",
+          nextWakeAt: null
+        });
+      } else {
+        updateActiveProject({
+          status: "waiting_window_reset",
+          nextWakeAt: nextWake.toISOString()
+        });
+      }
     } else if (
       waveResult.outcome === "RATE_LIMITED_WEEKLY" ||
       waveResult.outcome === "HARD_STOP_REACHED" ||

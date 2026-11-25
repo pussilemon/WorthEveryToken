@@ -13,6 +13,45 @@ export const CustomProviderConfigSchema = z.object({
 });
 export type CustomProviderConfig = z.infer<typeof CustomProviderConfigSchema>;
 
+export const QuotaBucketSchema = z.object({
+  id: z.string(),
+  role: z.enum(["primary", "sub_window"]),
+  scope: z.enum(["account", "model"]),
+  model: z.string().nullable().default(null),
+  windowType: z.enum(["rolling", "fixed"]),
+  durationHours: z.number().positive(),
+  usedPct: z.number().min(0).max(100),
+  resetAt: z.string().datetime().nullable(),
+  confidence: z.enum(["high", "medium", "low"]).default("medium")
+});
+export type QuotaBucket = z.infer<typeof QuotaBucketSchema>;
+
+export const QuotaTopologyTypeSchema = z.enum([
+  "TWO_TIER_WINDOW",
+  "SINGLE_CYCLE_CAP",
+  "ROLLING_ONLY",
+  "MULTI_BUCKET_CASCADE",
+  "UNKNOWN"
+]);
+export type QuotaTopologyType = z.infer<typeof QuotaTopologyTypeSchema>;
+
+export const UsageSnapshotSchema = z.object({
+  provider: ProviderIdSchema,
+  probedAt: z.string().datetime(),
+  source: z.enum([
+    "cli_probe",
+    "rate_limit_learned",
+    "rate_limit_header",
+    "local_logs",
+    "benchmark_preset",
+    "fallback_manual"
+  ]),
+  buckets: z.array(QuotaBucketSchema).default([]),
+  detectedModel: z.string().nullable().default(null),
+  rawSnippet: z.string().optional()
+});
+export type UsageSnapshot = z.infer<typeof UsageSnapshotSchema>;
+
 export const GlobalScheduleConfigSchema = z.object({
   auto_detect_reset: z.boolean().default(true),
   fallback_weekly_reset_day: z.enum(["mon", "tue", "wed", "thu", "fri", "sat", "sun"]).default("mon"),
@@ -21,7 +60,22 @@ export const GlobalScheduleConfigSchema = z.object({
   window_hours: z.number().default(5),
   target_weekly_burn_pct: z.number().min(1).max(100).default(99),
   wave_buffer_minutes: z.number().min(0).default(15),
-  hard_stop_before_reset_minutes: z.number().min(1).default(10),
+  hard_stop_before_reset_minutes: z.number().min(1).default(20),
+  min_task_reserve_minutes: z.number().min(1).default(6),
+  user_idle_minutes: z.number().min(1).default(15),
+  quiet_hours: z
+    .object({
+      enabled: z.boolean().default(true),
+      start: z.string().default("22:00"),
+      end: z.string().default("08:00"),
+      allow_daytime_if_expiring_within_hours: z.number().default(6)
+    })
+    .default(() => ({
+      enabled: true,
+      start: "22:00",
+      end: "08:00",
+      allow_daytime_if_expiring_within_hours: 6
+    })),
   watcher_interval_minutes: z.number().min(1).default(15)
 });
 
@@ -59,22 +113,25 @@ export const ActiveProjectSchema = z.object({
   repoName: z.string(),
   armedAt: z.string().datetime(),
   auditBranch: z.string().nullable().default(null),
-  status: z.enum(["armed", "running_wave", "waiting_window_reset", "completed_cycle", "paused"]),
+  status: z.enum(["armed", "running_wave", "waiting_window_reset", "completed_cycle", "paused", "yielded_to_user"]),
   auditPassCount: z.number().int().min(0).default(0),
   nextWakeAt: z.string().datetime().nullable().default(null),
   lastWaveStartedAt: z.string().datetime().nullable().default(null),
   lastWaveWeeklyPctBefore: z.number().min(0).max(100).nullable().default(null),
+  lockedCycleResetAt: z.string().datetime().nullable().default(null),
+  cyclePeakUsedPct: z.number().min(0).max(100).nullable().default(null),
   lastRunError: z.string().nullable().default(null)
 });
 
 export const LastKnownUsageSchema = z.object({
   provider: ProviderIdSchema,
   probedAt: z.string().datetime(),
-  source: z.enum(["cli_probe", "rate_limit_header", "local_logs", "fallback_manual"]),
-  weeklyUsedPct: z.number().min(0).max(100).nullable(),
-  weeklyResetAt: z.string().datetime().nullable(),
-  window5hUsedPct: z.number().min(0).max(100).nullable(),
-  window5hResetAt: z.string().datetime().nullable(),
+  source: z.enum(["cli_probe", "rate_limit_learned", "rate_limit_header", "local_logs", "benchmark_preset", "fallback_manual"]),
+  buckets: z.array(QuotaBucketSchema).default([]),
+  weeklyUsedPct: z.number().min(0).max(100).nullable().optional(),
+  weeklyResetAt: z.string().datetime().nullable().optional(),
+  window5hUsedPct: z.number().min(0).max(100).nullable().optional(),
+  window5hResetAt: z.string().datetime().nullable().optional(),
   detectedModel: z.string().nullable().optional()
 });
 

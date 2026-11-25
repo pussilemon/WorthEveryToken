@@ -62,7 +62,8 @@ export class QualityGatesRunner {
     adapter: AgentAdapter,
     gitManager: GitManager,
     maxRetries = 3,
-    promptTemplatePath = "prompts/phase3-repair.md"
+    promptTemplatePath = "prompts/phase3-repair.md",
+    deadlineAt?: Date
   ): Promise<boolean> {
     let gateResult = await this.runAllGates(worktreePath);
     if (gateResult.passed) {
@@ -89,7 +90,8 @@ export class QualityGatesRunner {
       });
 
       const repairResult = await adapter.runRepair(repairPrompt, worktreePath, {
-        allowedTools: "Read,Edit,Write,Glob,Grep,Bash(npm:*),Bash(pnpm:*),Bash(npx:*),Bash(pytest:*),Bash(go test:*)"
+        allowedTools: "Read,Edit,Write,Glob,Grep,Bash(npm:*),Bash(pnpm:*),Bash(npx:*),Bash(pytest:*),Bash(go test:*)",
+        deadlineAt
       });
 
       if (repairResult.status === "BLOCKED") {

@@ -121,8 +121,12 @@ describe("GitManager Integration", () => {
     const integrated = await gitManager.integrateTask(task.id, sha, worktreePath);
     expect(integrated).toBe(true);
 
-    // Verify file exists on audit branch
-    expect(fs.existsSync(path.join(tmpDir, "src", "good.ts"))).toBe(true);
+    // Verify file exists on audit branch (.wet/audit-head) but NOT in repoRoot (Zero-Touch Git)
+    expect(fs.existsSync(path.join(tmpDir, ".wet", "audit-head", "src", "good.ts"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "src", "good.ts"))).toBe(false);
+
+    const { stdout: showContent } = await execa("git", ["show", `${gitManager.auditBranch}:src/good.ts`], { cwd: tmpDir });
+    expect(showContent).toBe("export const ok = true;");
 
     await gitManager.removeWorktree(task.id);
     expect(fs.existsSync(worktreePath)).toBe(false);

@@ -4,12 +4,14 @@ import {
   BacklogSchema,
   type Backlog,
   type ProviderId,
-  type WetGlobalConfig
+  type WetGlobalConfig,
+  type QuotaBucket
 } from "../config/schema.js";
 
 export interface AgentExecutionOptions {
   cwd?: string;
   timeoutSec?: number;
+  deadlineAt?: Date;
   maxTurns?: number;
   maxBudgetUsd?: number;
   model?: string;
@@ -35,7 +37,8 @@ export interface ExecutionResult {
 export interface UsageSnapshot {
   provider: ProviderId;
   probedAt: Date;
-  source: "cli_probe" | "rate_limit_header" | "local_logs" | "fallback_manual";
+  source: "cli_probe" | "rate_limit_learned" | "rate_limit_header" | "local_logs" | "benchmark_preset" | "fallback_manual";
+  buckets: QuotaBucket[];
   weeklyUsedPct: number | null;
   weeklyResetAt: Date | null;
   window5hUsedPct: number | null;
@@ -175,11 +178,13 @@ export function parseUsageText(text: string): {
   weeklyResetAt: Date | null;
   window5hUsedPct: number | null;
   window5hResetAt: Date | null;
+  buckets: QuotaBucket[];
 } {
   let weeklyUsedPct: number | null = null;
   let weeklyResetAt: Date | null = null;
   let window5hUsedPct: number | null = null;
   let window5hResetAt: Date | null = null;
+  const buckets: QuotaBucket[] = [];
 
   // Percentage patterns: e.g. "Weekly limit: 73% used" or "weekly: 73%"
   const weeklyPctMatch = text.match(/weekly(?:\s+limit)?[:\s]+(\d+(?:\.\d+)?)\s*%/i);
@@ -187,9 +192,29 @@ export function parseUsageText(text: string): {
     weeklyUsedPct = parseFloat(weeklyPctMatch[1]);
   }
 
-  const window5hPctMatch = text.match(/(?:5-hour|5h|session)(?:\s+limit)?[:\s]+(\d+(?:\.\d+)?)\s*%/i);
-  if (window5hPctMatch?.[1]) {
-    window5hUsedPct = parseFloat(window5hPctMatch[1]);
+  // Daily pattern: e.g. "Daily limit: 60% used"
+  const dailyPctMatch = text.match(/(?:daily|24-hour|24h)(?:\s+limit)?[:\s]+(\d+(?:\.\d+)?)\s*%/i);
+  let dailyUsedPct: number | null = null;
+  if (dailyPctMatch?.[1]) {
+    dailyUsedPct = parseFloat(dailyPctMatch[1]);
+  }
+
+  // Rolling window: e.g. "5-hour limit: 45%", "3h limit: 20%", "6-hour: 30%"
+  let windowHours = 5;
+  const customWindowMatch = text.match(/(\d+)(?:-hour|h)(?:\s+limit)?[:\s]+(\d+(?:\.\d+)?)\s*%/i);
+  if (customWindowMatch?.[1] && customWindowMatch[2]) {
+    const hoursParsed = parseInt(customWindowMatch[1], 10);
+    if (hoursParsed > 0 && hoursParsed < 24) {
+      windowHours = hoursParsed;
+      window5hUsedPct = parseFloat(customWindowMatch[2]);
+    }
+  }
+
+  if (window5hUsedPct === null) {
+    const sessionPctMatch = text.match(/(?:5-hour|5h|session)(?:\s+limit)?[:\s]+(\d+(?:\.\d+)?)\s*%/i);
+    if (sessionPctMatch?.[1]) {
+      window5hUsedPct = parseFloat(sessionPctMatch[1]);
+    }
   }
 
   // Relative resets: e.g. "Resets in 2h 15m" or "resets in 45m"
@@ -227,5 +252,69 @@ export function parseUsageText(text: string): {
     weeklyResetAt = targetDate;
   }
 
-  return { weeklyUsedPct, weeklyResetAt, window5hUsedPct, window5hResetAt };
+  // Check model-specific bucket patterns (e.g. "Opus: 40% used", "Sonnet limit: 80%")
+  const modelRegex = /(opus|sonnet|haiku|o3-mini|o3|o1|gpt-4o|gemini-2\.5-pro|gemini-2\.5-flash)(?:\s+limit)?[:\s]+(\d+(?:\.\d+)?)\s*%/gi;
+  let modelMatch: RegExpExecArray | null;
+  while ((modelMatch = modelRegex.exec(text)) !== null) {
+    const mName = modelMatch[1]?.toLowerCase();
+    const mPct = parseFloat(modelMatch[2] ?? "0");
+    if (mName) {
+      buckets.push({
+        id: `model_${mName}`,
+        role: "primary",
+        scope: "model",
+        model: mName,
+        windowType: "fixed",
+        durationHours: 168,
+        usedPct: mPct,
+        resetAt: weeklyResetAt ? weeklyResetAt.toISOString() : null,
+        confidence: "high"
+      });
+    }
+  }
+
+  // Populate sub_window bucket if found
+  if (window5hUsedPct !== null) {
+    buckets.push({
+      id: `rolling_${windowHours}h`,
+      role: "sub_window",
+      scope: "account",
+      model: null,
+      windowType: "rolling",
+      durationHours: windowHours,
+      usedPct: window5hUsedPct,
+      resetAt: window5hResetAt ? window5hResetAt.toISOString() : null,
+      confidence: "high"
+    });
+  }
+
+  // Populate primary weekly bucket if found
+  if (weeklyUsedPct !== null) {
+    buckets.push({
+      id: "weekly_all",
+      role: "primary",
+      scope: "account",
+      model: null,
+      windowType: "fixed",
+      durationHours: 168,
+      usedPct: weeklyUsedPct,
+      resetAt: weeklyResetAt ? weeklyResetAt.toISOString() : null,
+      confidence: "high"
+    });
+  } else if (dailyUsedPct !== null) {
+    // Populate primary daily bucket if weekly was absent
+    buckets.push({
+      id: "daily_24h",
+      role: "primary",
+      scope: "account",
+      model: null,
+      windowType: "fixed",
+      durationHours: 24,
+      usedPct: dailyUsedPct,
+      resetAt: window5hResetAt ? window5hResetAt.toISOString() : null,
+      confidence: "high"
+    });
+  }
+
+  return { weeklyUsedPct, weeklyResetAt, window5hUsedPct, window5hResetAt, buckets };
 }

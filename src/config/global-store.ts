@@ -126,6 +126,8 @@ export function armProject(
     nextWakeAt: null,
     lastWaveStartedAt: null,
     lastWaveWeeklyPctBefore: null,
+    lockedCycleResetAt: null,
+    cyclePeakUsedPct: null,
     lastRunError: null
   };
 

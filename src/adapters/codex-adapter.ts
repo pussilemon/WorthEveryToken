@@ -90,6 +90,7 @@ export class CodexAdapter implements AgentAdapter {
       provider: "codex",
       probedAt: new Date(startTime),
       source: parsed.weeklyUsedPct !== null ? "cli_probe" : "fallback_manual",
+      buckets: parsed.buckets,
       weeklyUsedPct: parsed.weeklyUsedPct,
       weeklyResetAt: parsed.weeklyResetAt,
       window5hUsedPct: parsed.window5hUsedPct,
@@ -144,10 +145,28 @@ export class CodexAdapter implements AgentAdapter {
     let rateLimitReset: string | undefined;
     let rateLimitType: "5h" | "weekly" | undefined;
 
+    const taskTimeoutMs = (options.timeoutSec ?? 300) * 1000;
+    let effectiveTimeoutMs = taskTimeoutMs;
+    if (options.deadlineAt) {
+      const remainingUntilDeadline = options.deadlineAt.getTime() - Date.now();
+      if (remainingUntilDeadline <= 0) {
+        return {
+          exitCode: 124,
+          status: "FAILED",
+          digest: null,
+          output: "",
+          error: "Process not started: hard deadline already expired",
+          metrics: { durationMs: 0 }
+        };
+      }
+      effectiveTimeoutMs = Math.min(taskTimeoutMs, remainingUntilDeadline);
+    }
+
     try {
       const subprocess = execa(this.binary, args, {
         cwd: options.cwd,
-        timeout: options.timeoutSec ? options.timeoutSec * 1000 : 300000,
+        timeout: effectiveTimeoutMs,
+        cleanup: true,
         env: {
           ...process.env,
           CI: "1"

@@ -7,6 +7,7 @@ import { type AgentAdapter } from "../adapters/agent-adapter.js";
 import { ClaudeAdapter } from "../adapters/claude-adapter.js";
 import { QualityGatesRunner } from "./quality-gates.js";
 import { CircuitBreaker } from "./circuit-breaker.js";
+import { CycleGuard } from "../scheduler/cycle-guard.js";
 import { QuotaGuard } from "../telemetry/quota-guard.js";
 import { BurnProfiler } from "../telemetry/burn-profiler.js";
 import { Reporter } from "../telemetry/reporter.js";
@@ -197,13 +198,20 @@ export class Orchestrator {
         return "skipped";
       }
 
-      // Check hardStopAt before starting a new task
-      if (options.hardStopAt && Date.now() >= options.hardStopAt.getTime()) {
-        this.stopRequested = true;
-        this.stopReason = "HARD_STOP_REACHED (pre-reset buffer reached)";
-        logger.warn({ hardStopAt: options.hardStopAt }, "Wave hard stop time reached. Halting wave.");
-        task.status = "pending";
-        return "skipped";
+      // Check hardStopAt and CycleGuard fit check before starting a new task
+      if (options.hardStopAt) {
+        const fitCheck = CycleGuard.canStartNextTask({
+          now: new Date(),
+          hardStopAt: options.hardStopAt,
+          minTaskReserveMinutes: 6
+        });
+        if (!fitCheck.allowed) {
+          this.stopRequested = true;
+          this.stopReason = fitCheck.reason ?? "HARD_STOP_PRE_RESET";
+          logger.warn({ reason: this.stopReason }, "Halting wave before task start");
+          task.status = "pending";
+          return "skipped";
+        }
       }
 
       // Check Quota Guard limits
@@ -246,7 +254,8 @@ export class Orchestrator {
 
         const result = await this.adapter.runTask(prompt, worktreePath, {
           maxTurns: this.config.limits.claude_max_turns_per_task,
-          maxBudgetUsd: this.config.limits.claude_max_budget_usd_per_task
+          maxBudgetUsd: this.config.limits.claude_max_budget_usd_per_task,
+          deadlineAt: options.hardStopAt
         });
 
         if (result.status === "RATE_LIMITED") {
@@ -294,7 +303,9 @@ export class Orchestrator {
           worktreePath,
           this.adapter,
           this.gitManager,
-          this.config.limits.max_retries_per_task
+          this.config.limits.max_retries_per_task,
+          "prompts/phase3-repair.md",
+          options.hardStopAt
         );
 
         if (!gatesPassed) {

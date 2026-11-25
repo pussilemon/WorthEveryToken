@@ -16,6 +16,7 @@ export class GitManager {
   public readonly baseBranch: string;
   public readonly auditBranch: string;
   public readonly worktreeDir: string;
+  public readonly auditHeadDir: string;
   private integrationMutex: Promise<void> = Promise.resolve();
 
   constructor(options: GitManagerOptions = {}) {
@@ -24,6 +25,7 @@ export class GitManager {
     const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
     this.auditBranch = `${options.auditBranchPrefix ?? "ai-weekend-audit"}-${dateStr}`;
     this.worktreeDir = path.resolve(this.repoRoot, options.worktreeDir ?? ".wet/worktrees");
+    this.auditHeadDir = path.resolve(this.repoRoot, ".wet/audit-head");
   }
 
   private async execGit(args: string[], cwd = this.repoRoot): Promise<{ stdout: string; stderr: string }> {
@@ -31,20 +33,14 @@ export class GitManager {
   }
 
   public async checkPreflight(): Promise<void> {
-    const { stdout } = await this.execGit(["status", "--porcelain"]);
-    const dirtyFiles = stdout
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0 && !line.includes(".wet"));
-
-    if (dirtyFiles.length > 0) {
-      throw new Error(
-        `Pre-flight check failed: Working tree has uncommitted changes:\n${dirtyFiles.join("\n")}`
-      );
-    }
+    // Zero-Touch Git: We verify that repoRoot is a valid Git repository.
+    // We intentionally do NOT fail on dirty working trees because wet NEVER checks out
+    // or switches branches in repoRoot.
+    await this.execGit(["rev-parse", "--git-dir"]);
   }
 
   public async ensureCleanPostAudit(): Promise<void> {
+    // If audit was executed in repoRoot and created unstaged files, clean them up
     const { stdout } = await this.execGit(["status", "--porcelain"]);
     const dirtyLines = stdout
       .split("\n")
@@ -65,14 +61,26 @@ export class GitManager {
     const { stdout: branches } = await this.execGit(["branch", "--list", this.auditBranch]);
     const branchExists = branches.trim().length > 0;
 
-    if (branchExists) {
-      if (!resume) {
-        logger.info({ branch: this.auditBranch }, "Audit branch already exists. Resuming on existing branch.");
+    if (!branchExists) {
+      logger.info({ branch: this.auditBranch, base: this.baseBranch }, "Creating new audit branch from base (Zero-Touch)");
+      try {
+        await this.execGit(["branch", this.auditBranch, this.baseBranch]);
+      } catch {
+        await this.execGit(["branch", this.auditBranch, "HEAD"]);
       }
-      await this.execGit(["checkout", this.auditBranch]);
-    } else {
-      logger.info({ branch: this.auditBranch, base: this.baseBranch }, "Creating new audit branch from base");
-      await this.execGit(["checkout", "-b", this.auditBranch, this.baseBranch]);
+    } else if (!resume) {
+      logger.info({ branch: this.auditBranch }, "Audit branch already exists. Using existing branch.");
+    }
+
+    // Zero-Touch Git: Maintain dedicated hidden worktree .wet/audit-head attached to auditBranch
+    fs.mkdirSync(path.dirname(this.auditHeadDir), { recursive: true });
+    if (!fs.existsSync(this.auditHeadDir)) {
+      try {
+        await this.execGit(["worktree", "add", this.auditHeadDir, this.auditBranch]);
+      } catch {
+        await this.execGit(["worktree", "prune"]);
+        await this.execGit(["worktree", "add", "--force", this.auditHeadDir, this.auditBranch]);
+      }
     }
 
     return this.auditBranch;
@@ -116,7 +124,7 @@ export class GitManager {
 
       if (fs.existsSync(srcPath) && !fs.existsSync(destPath)) {
         try {
-          fs.symlinkSync(srcPath, destPath, "dir");
+          fs.symlinkSync(srcPath, destPath, "junction");
           logger.debug({ dep, worktreePath }, "Symlinked dependency directory into worktree");
         } catch (err) {
           logger.warn({ dep, err }, "Failed to symlink dependency directory");
@@ -143,7 +151,6 @@ export class GitManager {
   }
 
   public async commitTaskInWorktree(taskId: string, task: Task, worktreePath: string): Promise<string> {
-    // Check if there are any changes produced
     const { stdout: status } = await this.execGit(["status", "--porcelain"], worktreePath);
     const meaningfulChanges = status
       .split("\n")
@@ -151,7 +158,6 @@ export class GitManager {
       .filter((l) => {
         if (l.length === 0) return false;
         if (l.includes(".wet")) return false;
-        // Ignore untracked dependency symlinks
         if (l.includes("node_modules") || l.includes(".venv") || l.includes("venv")) return false;
         return true;
       });
@@ -178,16 +184,16 @@ export class GitManager {
     const release = await this.acquireMutex();
 
     try {
-      logger.info({ taskId, commitSha }, "Integrating task commit into audit branch");
-      await this.execGit(["checkout", this.auditBranch]);
+      logger.info({ taskId, commitSha }, "Integrating task commit into audit branch via .wet/audit-head");
 
+      // Cherry-pick strictly inside .wet/audit-head — ZERO touch on repoRoot HEAD
       try {
-        await this.execGit(["cherry-pick", commitSha]);
-        logger.info({ taskId, commitSha }, "Cherry-pick integrated cleanly");
+        await this.execGit(["cherry-pick", commitSha], this.auditHeadDir);
+        logger.info({ taskId, commitSha }, "Cherry-pick integrated cleanly into .wet/audit-head");
         return true;
       } catch (cherryPickErr) {
         logger.warn({ taskId, err: cherryPickErr }, "Cherry-pick conflict detected during integration, attempting rebase");
-        await this.execGit(["cherry-pick", "--abort"]).catch(() => {});
+        await this.execGit(["cherry-pick", "--abort"], this.auditHeadDir).catch(() => {});
 
         // Rebase task worktree on latest auditBranch
         try {
@@ -198,19 +204,17 @@ export class GitManager {
           return false;
         }
 
-        // Re-run quality gate verification if hook provided
         if (onConflictRetry) {
-          const pass = await onConflictRetry();
-          if (!pass) {
-            logger.error({ taskId }, "Quality gates failed after rebase");
-            return false;
+          const retriedPassed = await onConflictRetry();
+          if (retriedPassed) {
+            const { stdout: newSha } = await this.execGit(["rev-parse", "HEAD"], worktreePath);
+            await this.execGit(["cherry-pick", newSha.trim()], this.auditHeadDir);
+            logger.info({ taskId, newSha: newSha.trim() }, "Rebased commit integrated cleanly into .wet/audit-head");
+            return true;
           }
         }
 
-        const { stdout: newSha } = await this.execGit(["rev-parse", "HEAD"], worktreePath);
-        await this.execGit(["checkout", this.auditBranch]);
-        await this.execGit(["cherry-pick", newSha.trim()]);
-        return true;
+        return false;
       }
     } finally {
       release();
@@ -221,7 +225,6 @@ export class GitManager {
     const taskWorktreePath = path.join(this.worktreeDir, taskId);
     const taskBranch = `wet-task-${taskId}`;
 
-    // Safely remove any dependency symlinks first
     this.unlinkDependencyDirectories(taskWorktreePath);
 
     try {
@@ -232,7 +235,6 @@ export class GitManager {
 
     if (fs.existsSync(taskWorktreePath)) {
       try {
-        // Double check no symlinks inside before rmSync
         this.unlinkDependencyDirectories(taskWorktreePath);
         fs.rmSync(taskWorktreePath, { recursive: true, force: true });
       } catch {
@@ -259,7 +261,7 @@ export class GitManager {
       const { stdout } = await this.execGit(["worktree", "list", "--porcelain"]);
       const lines = stdout.split("\n");
       for (const line of lines) {
-        if (line.startsWith("worktree ") && line.includes(".wet/worktrees")) {
+        if (line.startsWith("worktree ") && line.includes(".wet")) {
           const wtPath = line.replace("worktree ", "").trim();
           this.unlinkDependencyDirectories(wtPath);
           try {

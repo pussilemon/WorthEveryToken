@@ -117,6 +117,7 @@ export class AgyAdapter implements AgentAdapter {
       provider: "agy",
       probedAt: new Date(startTime),
       source: parsed.weeklyUsedPct !== null ? "cli_probe" : "fallback_manual",
+      buckets: parsed.buckets,
       weeklyUsedPct: parsed.weeklyUsedPct,
       weeklyResetAt: parsed.weeklyResetAt,
       window5hUsedPct: parsed.window5hUsedPct,
@@ -159,7 +160,21 @@ export class AgyAdapter implements AgentAdapter {
       env.AGY_HEADLESS = "1";
     }
 
-    const wallClockSec = options.timeoutSec ?? this.wallClockTimeoutSec;
+    let wallClockSec = options.timeoutSec ?? this.wallClockTimeoutSec;
+    if (options.deadlineAt) {
+      const remainingSec = Math.floor((options.deadlineAt.getTime() - Date.now()) / 1000);
+      if (remainingSec <= 0) {
+        return {
+          exitCode: 124,
+          status: "FAILED",
+          digest: null,
+          output: "",
+          error: "Process not started: hard deadline already expired",
+          metrics: { durationMs: 0 }
+        };
+      }
+      wallClockSec = Math.min(wallClockSec, remainingSec);
+    }
     const silenceSec = this.silenceWatchdogSec;
 
     let rawFullOutput = "";

@@ -13,8 +13,10 @@ import {
 } from "../config/global-store.js";
 import { type ProviderId, type WetGlobalConfig } from "../config/schema.js";
 import { getAdapter } from "../adapters/registry.js";
+import type { UsageSnapshot } from "../adapters/agent-adapter.js";
 import { CalibrationEngine } from "../scheduler/calibration-engine.js";
-import { computeWavePlan } from "../scheduler/wave-planner.js";
+import { computeExecutionPlan } from "../scheduler/wave-planner.js";
+import { classifyTopology } from "../scheduler/quota-topology.js";
 import {
   installBackgroundWatcher,
   uninstallBackgroundWatcher,
@@ -23,7 +25,8 @@ import {
 import {
   formatHeaderBanner,
   formatWaveTimelineTable,
-  formatUsageReport
+  formatUsageReport,
+  formatTopologyLabel
 } from "./formatters.js";
 import { autoDetectQualityGates, loadConfig } from "../config/loader.js";
 import { Orchestrator } from "../core/orchestrator.js";
@@ -80,9 +83,13 @@ export async function runFirstRunWizard(): Promise<WetGlobalConfig> {
     }
   ];
 
+  // Passaggio 1: Scegli l'unico provider attivo
+  const defaultProvider = hasClaude ? "claude" : hasCodex ? "codex" : hasAgy ? "agy" : hasGemini ? "gemini" : "claude";
+
   const selectedProvider = await p.select({
-    message: "Scegli l'unico provider attivo per il tuo abbonamento:",
-    options: providerOptions
+    message: "Passaggio 1/3 — Scegli l'abbonamento AI attivo da ottimizzare:",
+    options: providerOptions,
+    initialValue: defaultProvider
   });
 
   if (p.isCancel(selectedProvider)) {
@@ -93,26 +100,30 @@ export async function runFirstRunWizard(): Promise<WetGlobalConfig> {
   const globalConfig = loadGlobalConfig();
   globalConfig.provider = selectedProvider as ProviderId;
 
-  // Live probe
-  s.start(`Interrogazione in corso di ${selectedProvider} per quota e reset settimanale...`);
+  // Passaggio 2: Auto-rilevamento live
+  s.start(`Passaggio 2/3 — Rilevamento automatico quota, bucket e topologia per ${selectedProvider}...`);
   const adapter = getAdapter(globalConfig.provider, globalConfig);
   const usage = await adapter.probeUsage();
-  s.stop("Interrogazione completata.");
+  s.stop("Rilevamento live completato.");
+
+  const topology = classifyTopology(usage.buckets);
+  const topologyLabel = formatTopologyLabel(topology.type);
 
   if (usage.weeklyResetAt && usage.weeklyUsedPct !== null) {
     p.note(
-      `Reset rilevato: ${pc.cyan(usage.weeklyResetAt.toLocaleString())}\nUso settimanale: ${pc.yellow(`${usage.weeklyUsedPct}%`)} (residuo ${(100 - usage.weeklyUsedPct).toFixed(0)}%)`,
-      "Quota rilevata automaticamente ✓"
+      `Topologia: ${pc.magenta(topologyLabel)}\nReset rilevato: ${pc.cyan(usage.weeklyResetAt.toLocaleString())}\nQuota usata: ${pc.yellow(`${usage.weeklyUsedPct}%`)} (residuo ${(100 - usage.weeklyUsedPct).toFixed(0)}%)`,
+      "Topologia e Quota rilevate con successo ✓"
     );
   } else {
     p.note(
-      "La CLI non ha fornito la data di reset esatta. Verrà impostato il reset di fallback (Lunedì 08:00).",
-      "Attenzione"
+      `Topologia: ${pc.magenta(topologyLabel)}\nLa CLI non ha fornito la data di reset esatta. Verrà applicato il fallback (Lunedì 08:00).`,
+      "Configurazione orario fallback"
     );
   }
 
+  // Passaggio 3: Modalità invisibile in background
   const installWatcher = await p.confirm({
-    message: "Vuoi installare il Watcher automatico in background (systemd/cron) per bruciare i token da solo?",
+    message: "Passaggio 3/3 — Attivare la Modalità Invisibile in background (systemd/cron + Zero-Touch Git)?",
     initialValue: true
   });
 
@@ -130,9 +141,15 @@ export async function runFirstRunWizard(): Promise<WetGlobalConfig> {
     if (res.lingerWarning) {
       p.note(res.lingerWarning, "Avviso per sessioni SSH");
     }
+
+    const cwd = process.cwd();
+    if (fs.existsSync(path.join(cwd, ".git"))) {
+      armProject(cwd, { forceReplace: true });
+      p.note(`Cartella corrente "${path.basename(cwd)}" armata automaticamente in modalità invisibile!`, "Progetto Armato");
+    }
   }
 
-  p.outro(pc.green("Configurazione salvata con successo in ~/.wet/config.yaml!"));
+  p.outro(pc.green("WorthEveryToken v2.1 configurato con successo!"));
   return globalConfig;
 }
 
@@ -148,14 +165,15 @@ export async function runInteractiveMenu(): Promise<void> {
   const watcherStatus = await getWatcherStatus();
 
   // Try quick probe for display
-  const usage = machineState.lastKnownUsage
+  const usage: UsageSnapshot | null = machineState.lastKnownUsage
     ? {
         provider: machineState.lastKnownUsage.provider,
         probedAt: new Date(machineState.lastKnownUsage.probedAt),
         source: machineState.lastKnownUsage.source,
-        weeklyUsedPct: machineState.lastKnownUsage.weeklyUsedPct,
+        buckets: machineState.lastKnownUsage.buckets ?? [],
+        weeklyUsedPct: machineState.lastKnownUsage.weeklyUsedPct ?? null,
         weeklyResetAt: machineState.lastKnownUsage.weeklyResetAt ? new Date(machineState.lastKnownUsage.weeklyResetAt) : null,
-        window5hUsedPct: machineState.lastKnownUsage.window5hUsedPct,
+        window5hUsedPct: machineState.lastKnownUsage.window5hUsedPct ?? null,
         window5hResetAt: machineState.lastKnownUsage.window5hResetAt ? new Date(machineState.lastKnownUsage.window5hResetAt) : null,
         detectedModel: machineState.lastKnownUsage.detectedModel
       }
@@ -165,20 +183,21 @@ export async function runInteractiveMenu(): Promise<void> {
   const { rate: ratePer5h } = calibEngine.getRateForProvider(globalConfig.provider, globalConfig.subscription_tier);
 
   const now = new Date();
-  const resetAt = usage?.weeklyResetAt ?? new Date(Date.now() + 24 * 3600_000);
-  const plan = computeWavePlan({
-    now,
-    weeklyUsedPct: usage?.weeklyUsedPct ?? 0,
-    weeklyResetAt: resetAt,
-    window5hUsedPct: usage?.window5hUsedPct ?? null,
-    window5hResetAt: usage?.window5hResetAt ?? null,
-    weeklyPctPer5hWave: ratePer5h,
+  const topology = classifyTopology(usage?.buckets ?? []);
+  const plan = computeExecutionPlan({
+    topology,
+    calibration: {
+      primaryPctPerSubWindow: ratePer5h
+    },
     config: {
       targetWeeklyBurnPct: globalConfig.schedule.target_weekly_burn_pct,
       windowHours: globalConfig.schedule.window_hours,
       waveBufferMinutes: globalConfig.schedule.wave_buffer_minutes,
-      hardStopBeforeResetMinutes: globalConfig.schedule.hard_stop_before_reset_minutes
-    }
+      hardStopBeforeResetMinutes: globalConfig.schedule.hard_stop_before_reset_minutes,
+      minTaskReserveMinutes: globalConfig.schedule.min_task_reserve_minutes,
+      quietHours: globalConfig.schedule.quiet_hours
+    },
+    now
   });
 
   // Display banner
@@ -189,7 +208,8 @@ export async function runInteractiveMenu(): Promise<void> {
       usage,
       activeProject: machineState.activeProject,
       watcher: watcherStatus,
-      plan
+      plan,
+      topologyType: topology.type
     })
   );
 

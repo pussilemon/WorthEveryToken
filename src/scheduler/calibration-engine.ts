@@ -6,9 +6,104 @@ import { logger } from "../utils/logger.js";
 
 export interface CalibrationEntry {
   weeklyPctPer5hWave: number;
+  primaryPctPerSubWindow?: number;
+  primaryPctPerHour?: number;
+  avgActiveMinutesPerWave?: number;
   source: "observed" | "benchmark" | "preset";
   samples: number;
   lastUpdated: string;
+}
+
+export type RateLimitClassification =
+  | { type: "TRANSIENT_THROTTLE"; backoffSec: number; reason: string }
+  | { type: "SUB_WINDOW_EXHAUSTED"; subWindowDurationHours: number; resetAt: Date | null; reason: string }
+  | { type: "PRIMARY_QUOTA_EXHAUSTED"; primaryResetAt: Date | null; reason: string };
+
+export function classifyRateLimitError(
+  errorText: string,
+  resetAt: Date | null,
+  now: Date = new Date()
+): RateLimitClassification {
+  const lower = errorText.toLowerCase();
+
+  let waitMinutes: number | null = null;
+  if (resetAt) {
+    waitMinutes = Math.max(0, (resetAt.getTime() - now.getTime()) / 60_000);
+  }
+
+  const secWaitMatch = lower.match(/(?:retry|wait|try again)?\s*in\s*(\d+)\s*(?:s|sec|seconds?)/i);
+  if (secWaitMatch?.[1]) {
+    waitMinutes = parseInt(secWaitMatch[1], 10) / 60;
+  }
+  const minWaitMatch = lower.match(/(?:retry|wait|try again)?\s*in\s*(\d+)\s*(?:m|min|minutes?)/i);
+  if (minWaitMatch?.[1]) {
+    waitMinutes = parseInt(minWaitMatch[1], 10);
+  }
+  const hourWaitMatch = lower.match(/(?:retry|wait|try again)?\s*in\s*(\d+)\s*(?:h|hours?)/i);
+  if (hourWaitMatch?.[1]) {
+    waitMinutes = parseInt(hourWaitMatch[1], 10) * 60;
+  }
+
+  // 1. Transient throttle: wait < 5 minutes or mentions RPM / TPM / overloaded
+  if (
+    (waitMinutes !== null && waitMinutes < 5) ||
+    lower.includes("rpm") ||
+    lower.includes("tpm") ||
+    lower.includes("overloaded") ||
+    (lower.includes("rate_limit_error") && (waitMinutes === null || waitMinutes < 5))
+  ) {
+    const backoffSec = waitMinutes !== null && waitMinutes > 0 ? Math.ceil(waitMinutes * 60) : 30;
+    return {
+      type: "TRANSIENT_THROTTLE",
+      backoffSec: Math.min(90, Math.max(30, backoffSec)),
+      reason: "Transient rate limit throttle / concurrency overload"
+    };
+  }
+
+  // 2. Primary quota exhausted: wait > 12 hours or explicit daily / weekly / monthly
+  if (
+    (waitMinutes !== null && waitMinutes > 12 * 60) ||
+    lower.includes("weekly") ||
+    lower.includes("daily limit") ||
+    lower.includes("monthly quota") ||
+    lower.includes("weekly limit")
+  ) {
+    return {
+      type: "PRIMARY_QUOTA_EXHAUSTED",
+      primaryResetAt: resetAt,
+      reason: "Primary cycle quota exhausted"
+    };
+  }
+
+  // 3. Sub-window exhausted: wait between 15 minutes and 12 hours (or mentions 5-hour / 3-hour / session)
+  if (
+    (waitMinutes !== null && waitMinutes >= 15 && waitMinutes <= 12 * 60) ||
+    lower.includes("5-hour") ||
+    lower.includes("3-hour") ||
+    lower.includes("session limit")
+  ) {
+    let subDuration = 5;
+    if (lower.includes("3-hour") || lower.includes("3h")) subDuration = 3;
+    if (lower.includes("6-hour") || lower.includes("6h")) subDuration = 6;
+    if (waitMinutes !== null && waitMinutes > 0) {
+      subDuration = Math.round(waitMinutes / 60) || subDuration;
+    }
+
+    return {
+      type: "SUB_WINDOW_EXHAUSTED",
+      subWindowDurationHours: subDuration,
+      resetAt,
+      reason: `Sub-window capacity exhausted (${subDuration}h)`
+    };
+  }
+
+  // Default fallback if unclassified
+  return {
+    type: "SUB_WINDOW_EXHAUSTED",
+    subWindowDurationHours: 5,
+    resetAt,
+    reason: "Unclassified rate limit treated as sub-window pause"
+  };
 }
 
 export interface CalibrationData {
