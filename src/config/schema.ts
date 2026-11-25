@@ -1,5 +1,94 @@
 import { z } from "zod";
 
+// Provider IDs
+export const ProviderIdSchema = z.enum(["claude", "codex", "agy", "gemini", "custom"]);
+export type ProviderId = z.infer<typeof ProviderIdSchema>;
+
+export const CustomProviderConfigSchema = z.object({
+  binary: z.string(),
+  audit_args: z.array(z.string()),
+  exec_args: z.array(z.string()),
+  usage_cmd: z.string().optional(),
+  use_pty: z.boolean().default(false)
+});
+export type CustomProviderConfig = z.infer<typeof CustomProviderConfigSchema>;
+
+export const GlobalScheduleConfigSchema = z.object({
+  auto_detect_reset: z.boolean().default(true),
+  fallback_weekly_reset_day: z.enum(["mon", "tue", "wed", "thu", "fri", "sat", "sun"]).default("mon"),
+  fallback_weekly_reset_time: z.string().default("08:00"),
+  timezone: z.string().default("local"),
+  window_hours: z.number().default(5),
+  target_weekly_burn_pct: z.number().min(1).max(100).default(99),
+  wave_buffer_minutes: z.number().min(0).default(15),
+  hard_stop_before_reset_minutes: z.number().min(1).default(10),
+  watcher_interval_minutes: z.number().min(1).default(15)
+});
+
+export const GlobalExecutionConfigSchema = z.object({
+  max_parallel_workers: z.number().int().min(1).default(1),
+  max_tasks_per_audit: z.number().int().min(1).default(25),
+  max_audit_passes_per_cycle: z.number().int().min(1).default(3),
+  max_retries_per_task: z.number().int().min(0).default(3),
+  max_consecutive_failures: z.number().int().min(1).default(3),
+  task_timeout_sec: z.number().int().min(10).default(300),
+  silence_watchdog_sec: z.number().int().min(5).default(90)
+});
+
+export const GlobalCalibrationConfigSchema = z.object({
+  sync_external_benchmarks: z.boolean().default(true),
+  benchmark_source_url: z.string().default("https://aicodingdaily.com/subscription-usage"),
+  benchmark_cache_ttl_hours: z.number().default(168),
+  ema_alpha: z.number().min(0.01).max(1).default(0.4)
+});
+
+export const GlobalConfigSchema = z.object({
+  provider: ProviderIdSchema.default("claude"),
+  subscription_tier: z.string().default("auto"),
+  model_override: z.string().default("auto"),
+  reasoning_effort: z.enum(["max", "high", "medium"]).default("max"),
+  custom_provider: CustomProviderConfigSchema.optional(),
+  schedule: GlobalScheduleConfigSchema.default(() => GlobalScheduleConfigSchema.parse({})),
+  execution: GlobalExecutionConfigSchema.default(() => GlobalExecutionConfigSchema.parse({})),
+  calibration: GlobalCalibrationConfigSchema.default(() => GlobalCalibrationConfigSchema.parse({}))
+});
+export type WetGlobalConfig = z.infer<typeof GlobalConfigSchema>;
+
+export const ActiveProjectSchema = z.object({
+  repoPath: z.string(),
+  repoName: z.string(),
+  armedAt: z.string().datetime(),
+  auditBranch: z.string().nullable().default(null),
+  status: z.enum(["armed", "running_wave", "waiting_window_reset", "completed_cycle", "paused"]),
+  auditPassCount: z.number().int().min(0).default(0),
+  nextWakeAt: z.string().datetime().nullable().default(null),
+  lastWaveStartedAt: z.string().datetime().nullable().default(null),
+  lastWaveWeeklyPctBefore: z.number().min(0).max(100).nullable().default(null),
+  lastRunError: z.string().nullable().default(null)
+});
+
+export const LastKnownUsageSchema = z.object({
+  provider: ProviderIdSchema,
+  probedAt: z.string().datetime(),
+  source: z.enum(["cli_probe", "rate_limit_header", "local_logs", "fallback_manual"]),
+  weeklyUsedPct: z.number().min(0).max(100).nullable(),
+  weeklyResetAt: z.string().datetime().nullable(),
+  window5hUsedPct: z.number().min(0).max(100).nullable(),
+  window5hResetAt: z.string().datetime().nullable(),
+  detectedModel: z.string().nullable().optional()
+});
+
+export const MachineStateSchema = z.object({
+  activeProject: ActiveProjectSchema.nullable().default(null),
+  activeRunPid: z.number().int().nullable().default(null),
+  lastKnownUsage: LastKnownUsageSchema.nullable().default(null)
+});
+
+export type ActiveProject = z.infer<typeof ActiveProjectSchema>;
+export type LastKnownUsage = z.infer<typeof LastKnownUsageSchema>;
+export type MachineState = z.infer<typeof MachineStateSchema>;
+
+// Task & Backlog Schemas
 export const TaskCategorySchema = z.enum([
   "bug",
   "race_condition",
@@ -12,7 +101,7 @@ export const TaskCategorySchema = z.enum([
 ]);
 
 export const TaskSeveritySchema = z.enum(["critical", "high", "medium", "low"]);
-export const AgentTypeSchema = z.enum(["claude", "agy"]);
+export const AgentTypeSchema = z.enum(["claude", "codex", "agy", "gemini", "custom"]);
 export const TaskComplexitySchema = z.enum(["small", "medium"]);
 export const TaskStatusSchema = z.enum(["pending", "in_progress", "completed", "failed", "skipped"]);
 
@@ -24,7 +113,8 @@ export const TaskDigestSchema = z.object({
 });
 
 export const TaskMetricsSchema = z.object({
-  agent_used: z.enum(["claude", "agy"]).optional(),
+  agent_used: z.string().optional(),
+  provider: ProviderIdSchema.optional(),
   fallback_triggered: z.boolean().default(false),
   duration_ms: z.number().optional(),
   estimated_cost_usd: z.number().optional()
@@ -35,7 +125,7 @@ export const TaskSchema = z.object({
   title: z.string().min(5).max(120),
   category: TaskCategorySchema,
   severity: TaskSeveritySchema,
-  assigned_agent: AgentTypeSchema,
+  assigned_agent: AgentTypeSchema.optional().default("claude"),
   target_files: z.array(z.string()).min(1).max(6),
   depends_on: z.array(z.string()).default([]),
   description: z.string().min(20),

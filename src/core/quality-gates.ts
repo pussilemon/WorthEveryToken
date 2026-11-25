@@ -2,7 +2,7 @@ import { execa } from "execa";
 import type { QualityGateCommand, Task } from "../config/schema.js";
 import { logger } from "../utils/logger.js";
 import { compilePrompt } from "../config/loader.js";
-import type { ClaudeAdapter } from "../adapters/claude-adapter.js";
+import type { AgentAdapter } from "../adapters/agent-adapter.js";
 import type { GitManager } from "../git/git-manager.js";
 
 export interface QualityGateRunResult {
@@ -59,7 +59,7 @@ export class QualityGatesRunner {
   public async runAutoRepairLoop(
     task: Task,
     worktreePath: string,
-    claudeAdapter: ClaudeAdapter,
+    adapter: AgentAdapter,
     gitManager: GitManager,
     maxRetries = 3,
     promptTemplatePath = "prompts/phase3-repair.md"
@@ -74,8 +74,8 @@ export class QualityGatesRunner {
       attempt++;
       task.retries = attempt;
       logger.info(
-        { taskId: task.id, attempt, maxRetries, failedGate: gateResult.failedGate?.name },
-        "Initiating auto-repair session with Claude Code"
+        { taskId: task.id, attempt, maxRetries, failedGate: gateResult.failedGate?.name, provider: adapter.provider },
+        "Initiating auto-repair session with provider"
       );
 
       const gitDiff = await gitManager.getDiff(worktreePath);
@@ -88,8 +88,7 @@ export class QualityGatesRunner {
         GIT_DIFF: gitDiff || "(no unstaged diff)"
       });
 
-      const repairResult = await claudeAdapter.execute(repairPrompt, {
-        cwd: worktreePath,
+      const repairResult = await adapter.runRepair(repairPrompt, worktreePath, {
         allowedTools: "Read,Edit,Write,Glob,Grep,Bash(npm:*),Bash(pnpm:*),Bash(npx:*),Bash(pytest:*),Bash(go test:*)"
       });
 

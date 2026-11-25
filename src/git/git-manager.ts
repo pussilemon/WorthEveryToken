@@ -44,6 +44,23 @@ export class GitManager {
     }
   }
 
+  public async ensureCleanPostAudit(): Promise<void> {
+    const { stdout } = await this.execGit(["status", "--porcelain"]);
+    const dirtyLines = stdout
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0 && !l.includes(".wet"));
+
+    if (dirtyLines.length > 0) {
+      logger.warn(
+        { dirtyFiles: dirtyLines },
+        "Audit modified files in working directory despite read-only mode! Reverting changes..."
+      );
+      await this.execGit(["reset", "--hard", "HEAD"]);
+      await this.execGit(["clean", "-fd"]);
+    }
+  }
+
   public async initAuditBranch(resume = false): Promise<string> {
     const { stdout: branches } = await this.execGit(["branch", "--list", this.auditBranch]);
     const branchExists = branches.trim().length > 0;

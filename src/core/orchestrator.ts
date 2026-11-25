@@ -3,8 +3,8 @@ import path from "node:path";
 import { type WetConfig, type Backlog, type Task } from "../config/schema.js";
 import { GitManager } from "../git/git-manager.js";
 import { DagScheduler, type TaskExecutionOutcome } from "./dag-scheduler.js";
+import { type AgentAdapter } from "../adapters/agent-adapter.js";
 import { ClaudeAdapter } from "../adapters/claude-adapter.js";
-import { AgyAdapter } from "../adapters/agy-adapter.js";
 import { QualityGatesRunner } from "./quality-gates.js";
 import { CircuitBreaker } from "./circuit-breaker.js";
 import { QuotaGuard } from "../telemetry/quota-guard.js";
@@ -13,28 +13,36 @@ import { Reporter } from "../telemetry/reporter.js";
 import { compilePrompt, loadBacklog, saveBacklog } from "../config/loader.js";
 import { parseBacklogJson, parseFixPlanMd } from "../adapters/agent-adapter.js";
 import { logger } from "../utils/logger.js";
-import { execa } from "execa";
 
 export interface OrchestratorRunOptions {
   dryRun?: boolean;
   workers?: number;
   maxBudget?: number;
   resume?: boolean;
+  hardStopAt?: Date;
+}
+
+export interface WaveRunResult {
+  outcome: "COMPLETED" | "RATE_LIMITED_5H" | "RATE_LIMITED_WEEKLY" | "HARD_STOP_REACHED" | "CIRCUIT_BREAKER" | "STOPPED";
+  stopReason: string;
+  tasksCompleted: number;
+  tasksFailed: number;
+  reportPath?: string;
 }
 
 export class Orchestrator {
   private readonly config: WetConfig;
   private readonly gitManager: GitManager;
-  private readonly claudeAdapter: ClaudeAdapter;
-  private readonly agyAdapter: AgyAdapter;
+  private readonly adapter: AgentAdapter;
   private readonly qualityGatesRunner: QualityGatesRunner;
   private readonly circuitBreaker: CircuitBreaker;
   private readonly quotaGuard: QuotaGuard;
   private readonly burnProfiler: BurnProfiler;
   private stopRequested = false;
   private stopReason = "Backlog completed";
+  private rateLimitType?: "5h" | "weekly";
 
-  constructor(config: WetConfig) {
+  constructor(config: WetConfig, adapter?: AgentAdapter) {
     this.config = config;
     this.gitManager = new GitManager({
       repoRoot: config.project.root,
@@ -43,19 +51,12 @@ export class Orchestrator {
       worktreeDir: config.project.worktree_dir
     });
 
-    this.claudeAdapter = new ClaudeAdapter({
-      binary: config.claude.binary,
-      defaultModel: config.claude.model
-    });
-
-    this.agyAdapter = new AgyAdapter({
-      binary: config.agy.binary,
-      usePty: config.agy.use_pty,
-      disableSlowMcp: config.agy.disable_slow_mcp,
-      extraArgs: config.agy.extra_args,
-      wallClockTimeoutSec: config.limits.agy_wall_clock_timeout_sec,
-      silenceWatchdogSec: config.limits.agy_silence_watchdog_sec
-    });
+    this.adapter =
+      adapter ??
+      new ClaudeAdapter({
+        binary: config.claude?.binary,
+        defaultModel: config.claude?.model
+      });
 
     this.qualityGatesRunner = new QualityGatesRunner(
       config.quality_gates.commands,
@@ -77,21 +78,23 @@ export class Orchestrator {
 
   public async runAudit(maxTasks?: number): Promise<Backlog> {
     const max = maxTasks ?? this.config.limits.max_total_tasks;
-    logger.info({ maxTasks: max }, "Starting Phase 1 Read-Only Codebase Audit");
+    logger.info({ maxTasks: max, provider: this.adapter.provider }, "Starting Phase 1 Read-Only Codebase Audit");
 
     const auditPrompt = compilePrompt("prompts/phase1-audit.md", {
       REPO_PATH: path.resolve(this.config.project.root),
       MAX_TASKS: String(max)
     });
 
-    const result = await this.claudeAdapter.execute(auditPrompt, {
-      cwd: this.config.project.root,
-      model: this.config.claude.audit_model,
+    const result = await this.adapter.runAudit(auditPrompt, this.config.project.root, {
+      model: this.config.claude?.audit_model,
       allowedTools: "Read,Glob,Grep"
     });
 
+    // Revert any unintended file changes made during read-only audit
+    await this.gitManager.ensureCleanPostAudit();
+
     if (result.status === "RATE_LIMITED") {
-      throw new Error(`Claude Code is rate limited: ${result.rateLimitReset ?? "try again later"}`);
+      throw new Error(`${this.adapter.provider} is rate limited: ${result.rateLimitReset ?? "try again later"}`);
     }
 
     const parsedBacklog = parseBacklogJson(result.output);
@@ -112,7 +115,7 @@ export class Orchestrator {
       fixPlanMd ??
       `# WorthEveryToken Fix Plan\n\nGenerated: ${parsedBacklog.generated_at}\n\n` +
         parsedBacklog.tasks
-          .map((t) => `### [${t.id}] ${t.title} (${t.severity} - ${t.assigned_agent})\n${t.description}\n`)
+          .map((t) => `### [${t.id}] ${t.title} (${t.severity} - ${t.assigned_agent ?? this.adapter.provider})\n${t.description}\n`)
           .join("\n");
 
     fs.writeFileSync(path.join(".wet", "fix_plan.md"), planContent, "utf-8");
@@ -121,7 +124,7 @@ export class Orchestrator {
     return parsedBacklog;
   }
 
-  public async run(options: OrchestratorRunOptions = {}): Promise<void> {
+  public async runWave(options: OrchestratorRunOptions = {}): Promise<WaveRunResult> {
     const startTime = Date.now();
     await this.gitManager.checkPreflight();
 
@@ -151,7 +154,12 @@ export class Orchestrator {
 
     if (options.dryRun) {
       logger.info({ tasks: backlog.tasks.length, auditBranch }, "Dry-run mode: plan verified without executing tasks");
-      return;
+      return {
+        outcome: "COMPLETED",
+        stopReason: "Dry-run verified",
+        tasksCompleted: 0,
+        tasksFailed: 0
+      };
     }
 
     const workers = options.workers ?? this.config.project.max_parallel_workers;
@@ -163,7 +171,6 @@ export class Orchestrator {
       this.stopRequested = true;
       this.stopReason = `Interrupted by ${sig}`;
       if (backlog) {
-        // Leave any currently running task in pending so it can be resumed
         for (const t of backlog.tasks) {
           if (t.status === "in_progress") {
             t.status = "pending";
@@ -190,6 +197,15 @@ export class Orchestrator {
         return "skipped";
       }
 
+      // Check hardStopAt before starting a new task
+      if (options.hardStopAt && Date.now() >= options.hardStopAt.getTime()) {
+        this.stopRequested = true;
+        this.stopReason = "HARD_STOP_REACHED (pre-reset buffer reached)";
+        logger.warn({ hardStopAt: options.hardStopAt }, "Wave hard stop time reached. Halting wave.");
+        task.status = "pending";
+        return "skipped";
+      }
+
       // Check Quota Guard limits
       const quotaCheck = this.quotaGuard.shouldStop();
       if (quotaCheck.stop) {
@@ -208,90 +224,61 @@ export class Orchestrator {
         return "skipped";
       }
 
-      logger.info({ taskId: task.id, agent: task.assigned_agent }, "Executing task in isolated worktree");
+      logger.info({ taskId: task.id, provider: this.adapter.provider }, "Executing task in isolated worktree");
       const worktreePath = await this.gitManager.createWorktree(task.id);
 
       try {
         let taskPassed = false;
-        let agentToUse = task.assigned_agent;
-        let fallbackTriggered = false;
 
-        // Execute task with primary agent
-        if (agentToUse === "agy") {
-          const prompt = compilePrompt("prompts/phase2-agy-digest.md", {
-            TASK_ID: task.id,
-            TASK_TITLE: task.title,
-            TARGET_FILES: task.target_files.join(", "),
-            TASK_DESCRIPTION: task.description,
-            ACCEPTANCE_CRITERIA: task.acceptance_criteria.map((c) => `- ${c}`).join("\n")
-          });
+        const promptPath = fs.existsSync("prompts/phase2-execute.md")
+          ? "prompts/phase2-execute.md"
+          : "prompts/phase2-claude-fix.md";
 
-          const result = await this.agyAdapter.execute(prompt, { cwd: worktreePath });
-          this.agyAdapter.saveAgyLog(task.id, ".wet/logs", result.output);
+        const prompt = compilePrompt(promptPath, {
+          TASK_ID: task.id,
+          TASK_TITLE: task.title,
+          TASK_CATEGORY: task.category,
+          TASK_SEVERITY: task.severity,
+          TARGET_FILES: task.target_files.join(", "),
+          TASK_DESCRIPTION: task.description,
+          ACCEPTANCE_CRITERIA: task.acceptance_criteria.map((c) => `- ${c}`).join("\n")
+        });
 
-          if (result.status === "DONE" && result.digest) {
-            task.digest = result.digest;
-            taskPassed = true;
-          } else if (this.config.routing.agy_fallback_to_claude) {
-            logger.warn({ taskId: task.id }, "Agy failed or timed out. Triggering fallback to Claude Code");
-            fallbackTriggered = true;
-            agentToUse = "claude";
+        const result = await this.adapter.runTask(prompt, worktreePath, {
+          maxTurns: this.config.limits.claude_max_turns_per_task,
+          maxBudgetUsd: this.config.limits.claude_max_budget_usd_per_task
+        });
 
-            // Clean worktree before fallback attempt
-            await execa("git", ["reset", "--hard"], { cwd: worktreePath });
-            await execa("git", ["clean", "-fd"], { cwd: worktreePath });
-          } else {
-            task.failure_reason = result.error ?? "Agy execution failed";
-          }
+        if (result.status === "RATE_LIMITED") {
+          this.stopRequested = true;
+          this.rateLimitType = result.rateLimitType ?? "5h";
+          this.stopReason = `Rate limit encountered (${this.rateLimitType}): ${result.rateLimitReset ?? "wait for reset"}`;
+          task.status = "pending";
+          task.failure_reason = null;
+          await this.gitManager.removeWorktree(task.id);
+          saveBacklog(tasksPath, backlog);
+          return "skipped";
         }
 
-        if (agentToUse === "claude") {
-          const prompt = compilePrompt("prompts/phase2-claude-fix.md", {
-            TASK_ID: task.id,
-            TASK_TITLE: task.title,
-            TASK_CATEGORY: task.category,
-            TASK_SEVERITY: task.severity,
-            TARGET_FILES: task.target_files.join(", "),
-            TASK_DESCRIPTION: task.description,
-            ACCEPTANCE_CRITERIA: task.acceptance_criteria.map((c) => `- ${c}`).join("\n")
-          });
+        if (result.status === "BLOCKED") {
+          task.status = "skipped";
+          task.failure_reason = result.blockedReason ?? "Marked BLOCKED by agent";
+          await this.gitManager.removeWorktree(task.id);
+          saveBacklog(tasksPath, backlog);
+          return "skipped";
+        }
 
-          const result = await this.claudeAdapter.execute(prompt, {
-            cwd: worktreePath,
-            maxTurns: this.config.limits.claude_max_turns_per_task,
-            maxBudgetUsd: this.config.limits.claude_max_budget_usd_per_task,
-            allowedTools: "Read,Edit,Write,Glob,Grep,Bash(npm:*),Bash(pnpm:*),Bash(npx:*),Bash(pytest:*),Bash(go test:*)"
-          });
-
-          if (result.status === "RATE_LIMITED") {
-            this.stopRequested = true;
-            this.stopReason = `Rate limit encountered: ${result.rateLimitReset ?? "wait for reset"}`;
-            task.status = "pending";
-            task.failure_reason = null;
-            await this.gitManager.removeWorktree(task.id);
-            saveBacklog(tasksPath, backlog);
-            return "skipped";
-          }
-
-          if (result.status === "BLOCKED") {
-            task.status = "skipped";
-            task.failure_reason = result.blockedReason ?? "Marked BLOCKED by agent";
-            await this.gitManager.removeWorktree(task.id);
-            saveBacklog(tasksPath, backlog);
-            return "skipped";
-          }
-
-          if (result.status === "DONE") {
-            task.digest = result.digest;
-            taskPassed = true;
-          } else {
-            task.failure_reason = result.error ?? "Claude execution failed";
-          }
+        if (result.status === "DONE") {
+          task.digest = result.digest;
+          taskPassed = true;
+        } else {
+          task.failure_reason = result.error ?? "Execution failed";
         }
 
         task.metrics = {
-          agent_used: agentToUse,
-          fallback_triggered: fallbackTriggered
+          provider: this.adapter.provider,
+          agent_used: this.adapter.provider,
+          fallback_triggered: false
         };
 
         if (!taskPassed) {
@@ -305,7 +292,7 @@ export class Orchestrator {
         const gatesPassed = await this.qualityGatesRunner.runAutoRepairLoop(
           task,
           worktreePath,
-          this.claudeAdapter,
+          this.adapter,
           this.gitManager,
           this.config.limits.max_retries_per_task
         );
@@ -356,6 +343,34 @@ export class Orchestrator {
       stopReason: this.stopReason,
       backlog
     });
-    logger.info({ reportPath }, "Audit session completed. Full report generated.");
+    logger.info({ reportPath }, "Session completed. Full report generated.");
+
+    const completedCount = backlog.tasks.filter((t) => t.status === "completed").length;
+    const failedCount = backlog.tasks.filter((t) => t.status === "failed").length;
+
+    let outcome: WaveRunResult["outcome"] = "COMPLETED";
+    if (this.rateLimitType === "5h" || this.stopReason.includes("5h")) {
+      outcome = "RATE_LIMITED_5H";
+    } else if (this.rateLimitType === "weekly" || this.stopReason.includes("weekly")) {
+      outcome = "RATE_LIMITED_WEEKLY";
+    } else if (this.stopReason.includes("HARD_STOP")) {
+      outcome = "HARD_STOP_REACHED";
+    } else if (this.circuitBreaker.isOpen()) {
+      outcome = "CIRCUIT_BREAKER";
+    } else if (this.stopRequested) {
+      outcome = "STOPPED";
+    }
+
+    return {
+      outcome,
+      stopReason: this.stopReason,
+      tasksCompleted: completedCount,
+      tasksFailed: failedCount,
+      reportPath
+    };
+  }
+
+  public async run(options: OrchestratorRunOptions = {}): Promise<void> {
+    await this.runWave(options);
   }
 }
