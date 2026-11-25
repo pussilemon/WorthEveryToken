@@ -129,21 +129,24 @@ export class AgyAdapter implements AgentAdapter {
   public async runAudit(prompt: string, workdir: string, options: AgentExecutionOptions = {}): Promise<ExecutionResult> {
     return this.execute(prompt, {
       ...options,
-      cwd: workdir
+      cwd: workdir,
+      phase: "audit"
     });
   }
 
   public async runTask(prompt: string, workdir: string, options: AgentExecutionOptions = {}): Promise<ExecutionResult> {
     return this.execute(prompt, {
       ...options,
-      cwd: workdir
+      cwd: workdir,
+      phase: "execute"
     });
   }
 
   public async runRepair(prompt: string, workdir: string, options: AgentExecutionOptions = {}): Promise<ExecutionResult> {
     return this.execute(prompt, {
       ...options,
-      cwd: workdir
+      cwd: workdir,
+      phase: "repair"
     });
   }
 
@@ -295,11 +298,29 @@ export class AgyAdapter implements AgentAdapter {
               });
             }
 
-            if (exitCode === 0 && signal.status === "DONE" && digest !== null) {
+            if (exitCode === 0 && signal.status === "DONE") {
+              const phase = options.phase ?? "execute";
+              if (phase === "audit" || phase === "repair" || digest !== null) {
+                return resolve({
+                  exitCode: 0,
+                  status: "DONE",
+                  digest,
+                  output: normalized,
+                  metrics: { durationMs }
+                });
+              }
+
+              // Phase === "execute" with missing digest: provide synthetic fallback
+              logger.warn({ taskId: options.taskId }, "Agy finished with status=DONE but missing <WET_DIGEST>. Generating synthetic fallback digest.");
               return resolve({
                 exitCode: 0,
                 status: "DONE",
-                digest,
+                digest: {
+                  files_changed: [],
+                  summary: "Completed without structured digest",
+                  tests_added: 0,
+                  risks: []
+                },
                 output: normalized,
                 metrics: { durationMs }
               });

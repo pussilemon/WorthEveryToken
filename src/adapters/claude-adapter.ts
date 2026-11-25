@@ -54,7 +54,30 @@ export class ClaudeAdapter implements AgentAdapter {
       ptyOutput = await new Promise<string>((resolve) => {
         let full = "";
         let proc: pty.IPty | null = null;
-        const timer = setTimeout(() => {
+        let settleTimer: NodeJS.Timeout | null = null;
+
+        const cleanupAndResolve = () => {
+          if (settleTimer) {
+            clearTimeout(settleTimer);
+            settleTimer = null;
+          }
+          clearTimeout(globalTimer);
+          try {
+            proc?.write("/exit\r");
+            setTimeout(() => {
+              try {
+                proc?.kill("SIGKILL");
+              } catch {
+                // Ignore
+              }
+            }, 300);
+          } catch {
+            // Ignore
+          }
+          resolve(full);
+        };
+
+        const globalTimer = setTimeout(() => {
           try {
             proc?.kill("SIGKILL");
           } catch {
@@ -73,15 +96,15 @@ export class ClaudeAdapter implements AgentAdapter {
 
           proc.onData((data: string) => {
             full += data;
-            if (full.includes("5-hour") || full.includes("Weekly") || full.includes("Resets")) {
-              clearTimeout(timer);
-              try {
-                proc?.write("/exit\r");
-                setTimeout(() => proc?.kill("SIGKILL"), 500);
-              } catch {
-                // Ignore
-              }
-              resolve(full);
+            // Settle debounce: when relevant usage box output appears, wait 1200ms after last chunk
+            if (
+              full.includes("5-hour") ||
+              full.includes("Weekly") ||
+              full.includes("Resets") ||
+              full.includes("%")
+            ) {
+              if (settleTimer) clearTimeout(settleTimer);
+              settleTimer = setTimeout(cleanupAndResolve, 1200);
             }
           });
 
@@ -95,11 +118,13 @@ export class ClaudeAdapter implements AgentAdapter {
           }, 1500);
 
           proc.onExit(() => {
-            clearTimeout(timer);
+            if (settleTimer) clearTimeout(settleTimer);
+            clearTimeout(globalTimer);
             resolve(full);
           });
         } catch {
-          clearTimeout(timer);
+          if (settleTimer) clearTimeout(settleTimer);
+          clearTimeout(globalTimer);
           resolve(full);
         }
       });

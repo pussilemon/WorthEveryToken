@@ -133,4 +133,84 @@ describe("Zero-Touch Git Invisibility (src/git/git-manager.ts)", () => {
     );
     expect(logMsg).toContain("T-001");
   });
+
+  it("should isolate runAudit completely and prevent destructive data loss in repoRoot", async () => {
+    // 1. User has modified tracked file and new untracked file in repoRoot
+    fs.appendFileSync(path.join(tmpRepo, "src", "index.ts"), "// user working change\n", "utf-8");
+    fs.writeFileSync(path.join(tmpRepo, "untracked-note.txt"), "Important user note\n", "utf-8");
+
+    const { Orchestrator } = await import("../src/core/orchestrator.js");
+    const { loadConfig } = await import("../src/config/loader.js");
+
+    const config = loadConfig(tmpRepo);
+
+    // Mock adapter that deliberately writes rogue files in the workdir it receives
+    const rogueMockAdapter = {
+      provider: "claude" as const,
+      checkInstalled: async () => ({ available: true }),
+      getTopModelProfile: () => ({ model: "opus", extraFlags: [] }),
+      probeUsage: async () => ({
+        provider: "claude" as const,
+        probedAt: new Date(),
+        source: "cli_probe" as const,
+        buckets: [],
+        weeklyUsedPct: 20,
+        weeklyResetAt: new Date(),
+        window5hUsedPct: 10,
+        window5hResetAt: new Date()
+      }),
+      runAudit: async (_prompt: string, workdir: string) => {
+        // Deliberately pollute the audit workdir
+        fs.writeFileSync(path.join(workdir, "rogue-agent-file.txt"), "polluting...", "utf-8");
+        return {
+          exitCode: 0,
+          status: "DONE" as const,
+          digest: null,
+          output: `<WET_BACKLOG_JSON>
+{
+  "project": "test",
+  "generated_at": "${new Date().toISOString()}",
+  "base_branch": "main",
+  "audit_branch": "ai-weekend-audit-20261125",
+  "total_tasks": 1,
+  "tasks": [
+    {
+      "id": "T-001",
+      "title": "Audit Task",
+      "category": "bug",
+      "severity": "low",
+      "assigned_agent": "claude",
+      "target_files": ["src/index.ts"],
+      "depends_on": [],
+      "description": "Fix critical bug in index.ts file for application",
+      "acceptance_criteria": ["Done"],
+      "estimated_complexity": "small"
+    }
+  ]
+}
+</WET_BACKLOG_JSON>
+<WET_EXIT_SIGNAL status="DONE"/>`
+        };
+      },
+      runTask: async () => ({ exitCode: 0, status: "DONE" as const, digest: null, output: "" }),
+      runRepair: async () => ({ exitCode: 0, status: "DONE" as const, digest: null, output: "" })
+    };
+
+    const orchestrator = new Orchestrator(config, rogueMockAdapter);
+    const backlog = await orchestrator.runAudit();
+    expect(backlog.tasks.length).toBe(1);
+
+    // Assert that repoRoot tracked modifications and untracked files are 100% INTACT!
+    const indexContent = fs.readFileSync(path.join(tmpRepo, "src", "index.ts"), "utf-8");
+    expect(indexContent).toContain("// user working change");
+
+    expect(fs.existsSync(path.join(tmpRepo, "untracked-note.txt"))).toBe(true);
+    expect(fs.readFileSync(path.join(tmpRepo, "untracked-note.txt"), "utf-8")).toBe("Important user note\n");
+
+    // Rogue file should NOT exist in repoRoot
+    expect(fs.existsSync(path.join(tmpRepo, "rogue-agent-file.txt"))).toBe(false);
+
+    // Audit worktree .wet/audit-worktree should be completely removed
+    expect(fs.existsSync(path.join(tmpRepo, ".wet", "audit-worktree"))).toBe(false);
+  });
 });

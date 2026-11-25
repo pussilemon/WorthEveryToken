@@ -75,26 +75,57 @@ export function hasRecentAiLogWrites(userIdleMinutes = 15): boolean {
 
 export async function hasRecentRepoEdits(repoPath: string, idleMinutes = 10): Promise<boolean> {
   try {
-    // 1. Check uncommitted changes
-    const { stdout } = await execa("git", ["status", "--porcelain"], { cwd: repoPath, timeout: 5000 });
-    const dirtyFiles = stdout
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0 && !l.includes(".wet"));
+    const thresholdMs = Date.now() - idleMinutes * 60_000;
 
-    if (dirtyFiles.length > 0) {
-      return true;
+    // 1. Check uncommitted changes with null-delimiter (-z)
+    const { stdout } = await execa("git", ["status", "--porcelain", "-z"], { cwd: repoPath, timeout: 5000 });
+    const rawParts = stdout.split("\0");
+    const pathsToCheck: string[] = [];
+
+    for (let i = 0; i < rawParts.length; i++) {
+      const entry = rawParts[i];
+      if (!entry || entry.trim().length === 0) continue;
+
+      const status = entry.slice(0, 2);
+      const filePath = entry.slice(3);
+
+      if (filePath && !filePath.startsWith(".wet")) {
+        pathsToCheck.push(filePath);
+      }
+
+      // If rename/copy, the next token in -z is the target path
+      if ((status.includes("R") || status.includes("C")) && i + 1 < rawParts.length) {
+        i++;
+        const nextPath = rawParts[i];
+        if (nextPath && !nextPath.startsWith(".wet")) {
+          pathsToCheck.push(nextPath);
+        }
+      }
+    }
+
+    for (const relPath of pathsToCheck) {
+      const fullPath = path.resolve(repoPath, relPath);
+      try {
+        if (fs.existsSync(fullPath)) {
+          const stats = fs.statSync(fullPath);
+          if (stats.mtimeMs >= thresholdMs) {
+            logger.debug({ relPath, mtimeMs: stats.mtimeMs, thresholdMs }, "Detected active recent repo edit");
+            return true;
+          }
+        }
+      } catch {
+        // Ignore file access errors
+      }
     }
 
     // 2. Check recent mtime on committed files (excluding .git and .wet)
-    const thresholdMs = Date.now() - idleMinutes * 60_000;
     const entries = fs.readdirSync(repoPath, { withFileTypes: true });
     for (const entry of entries) {
       if (entry.name === ".git" || entry.name === ".wet" || entry.name === "node_modules") continue;
       const fullPath = path.join(repoPath, entry.name);
       try {
         const stats = fs.statSync(fullPath);
-        if (stats.mtimeMs > thresholdMs) {
+        if (stats.mtimeMs >= thresholdMs) {
           return true;
         }
       } catch {

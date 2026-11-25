@@ -1,169 +1,209 @@
-# WorthEveryToken (`wet`) v2
+# WorthEveryToken (`wet`)
 
 Autonomous, single-provider codebase auditor, test expander, and rolling-wave token burner.
 
-Designed to eliminate unused AI subscription tokens before weekly resets. `wet` probes your provider's quota, calculates dynamic 5-hour execution waves, and runs unattended in the background to systematically burn leftover quotas on high-impact code reliability improvements.
+WorthEveryToken systematically burns unused AI subscription quotas (Claude Code, OpenAI Codex, Antigravity, Gemini CLI, or Custom CLI) before weekly or daily resets, channeling excess capacity into high-impact code reliability improvements, test expansion, and automated refactoring with 100% Zero-Touch Git isolation.
 
 ---
 
-## What's New in v2
+## How It Works
 
-1. **Interactive Terminal TUI:**
-   - Type `wet` with no arguments to launch an interactive terminal interface (`@clack/prompts`).
-   - First run opens a guided setup wizard detecting installed CLIs (`claude`, `codex`, `agy`, `gemini`).
-   - Contextual daily menu in any Git repository for immediate execution, wave timeline inspection, and project arming.
+WorthEveryToken operates as a fully autonomous background daemon designed to maximize the value of your AI developer subscriptions without ever risking overage, bleed into the next billing cycle, or interference with active development.
 
-2. **Single Universal Provider (Zero Multi-Subscription Lock-In):**
-   - Choose **one active provider** (`claude`, `codex`, `agy`, `gemini`, or `custom`).
-   - That provider autonomously executes all 3 phases (Audit, Fix & Test, and Auto-Repair) using its top model at maximum reasoning effort.
+### 1. Universal Quota Topology
+Unlike rigid single-window tools, `wet` understands how modern AI subscription models work:
+- **`MULTI_BUCKET_CASCADE`**: Handles accounts with both rolling sub-windows (e.g. 5-hour rolling) and primary macro quotas (e.g. weekly 168h limit), as well as separate model tier limits (e.g. Claude Opus vs. Sonnet, or OpenAI o3 vs. GPT-4o). Automatically cascades from top-tier models down to secondary models when the primary tier exhausts.
+- **`SINGLE_CYCLE_CAP`**: For providers offering fixed daily (24h) or weekly (168h) quotas without rolling sub-windows.
+- **`ROLLING_ONLY`**: For providers constrained exclusively by rolling windows (e.g. 3h or 5h).
+- **`FAIL_CLOSED_UNKNOWN_RESET` (Fail-Closed Safety)**: If quota reset timestamps cannot be detected or verified with certainty, `wet` safely refuses to burn tokens rather than risking bleed into a new cycle.
 
-3. **Machine-Wide Single Active Project Enforcement:**
-   - Global state persisted in `~/.wet/` (`config.yaml`, `state.json`, `calibration.json`, `benchmarks-cache.json`).
-   - Only one repository can be armed at a time. Arming a new project automatically warns and requires explicit confirmation (`--force`).
+### 2. Autonomous Wave Planner & EMA Calibration
+`wet` automatically calculates the optimal moment to start burning tokens before your quota resets:
+- **Dynamic Wave Sizing**: Computes exactly how many 5-hour sub-windows ($N$) are required to safely burn leftover tokens without exceeding rolling caps.
+- **Lead-Time Calculation**: Schedules execution to commence $(N \times \text{windowHours} + \text{buffer})$ prior to the reset timestamp.
+- **Field EMA Calibration**: Continuously tracks and refines token burn velocity per wave using Exponential Moving Average (EMA):
+  $$\text{newRate} = \alpha \cdot \Delta + (1 - \alpha) \cdot \text{oldRate}$$
+  Ensures wave projections remain accurate over time across real-world workloads.
 
-4. **Dynamic 5-Hour Wave Scheduler & Pre-Reset Hard Stop:**
-   - Live quota probe detects remaining weekly % and reset timestamp.
-   - Calculates needed 5-hour waves: $N = \lceil \text{remainingPct} / \text{weeklyPctPer5hWave} \rceil$.
-   - Automatically schedules execution to start $(N \times 5\text{h} + \text{buffer})$ before the weekly reset.
-   - **Hard Stop:** Enforces a hard stop 10 minutes before weekly reset to never consume next week's quota.
+### 3. 5-Level Zero-Bleed Cycle Guard
+Five concentric safety barriers ensure your quotas are never exhausted during working hours and never spill into subsequent billing cycles:
+1. **Level 1 (Pre-Reset Hard Stop)**: Automatically halts execution 10 minutes before the billing cycle reset.
+2. **Level 2 (Task-Level Pre-Flight Budget Check)**: Estimates remaining task duration against time remaining until the hard stop; skips tasks that cannot finish cleanly before cutoff.
+3. **Level 3 (Early-Reset Immediate Abort)**: Continuously checks quota reset indicators; immediately halts the wave if an unexpected early cycle reset is detected.
+4. **Level 4 (Active User Guard)**: Pauses autonomous background runs if developer activity (file edits, unstaged or staged git changes within 15 minutes) is detected on the active repository.
+5. **Level 5 (Fail-Closed Protection)**: Aborts background scheduling if quota status or reset schedule cannot be authoritatively determined.
 
-5. **Field EMA Calibration Engine:**
-   - Calibrates observed consumption per 5h wave using Exponential Moving Average:
-     $$\text{newRate} = \alpha \cdot \Delta + (1 - \alpha) \cdot \text{oldRate}$$
-   - Includes built-in offline presets and defensive synchronization with `https://aicodingdaily.com/subscription-usage`.
+### 4. Zero-Touch Git Invisibility & Audit Isolation
+`wet` guarantees complete safety for user repositories:
+- **Phase 1 (Audit Worktree)**: Read-only exploration executes inside an ephemeral detached worktree (`.wet/audit-worktree`). Any untracked or modified files created during AI analysis are discarded completely upon completion, preserving developer working copies and active branches in their exact original state.
+- **Phase 2 & 3 (Task Worktrees & Cherry-Pick Head)**: Each task executes in an isolated worktree (`.wet/task-worktree`), runs quality gates, and integrates verified commits into `.wet/audit-head` (`ai-weekend-audit-YYYYMMDD`). Developer branches and uncommitted changes are never touched or modified.
 
-6. **Zero-RAM Background Watcher (`wet watch`):**
-   - Managed via `systemd --user` timer on Linux (`wet-watch.timer` running every 15 min) or `cron` fallback.
-   - Immune to SSH disconnections (`loginctl enable-linger $USER`). Zero RAM consumed while idle.
-
----
-
-## Directory Structure
-
-```text
-WorthEveryToken/
-├── package.json
-├── tsconfig.json
-├── eslint.config.js
-├── wet.config.example.yaml
-├── docker/
-│   └── Dockerfile.sandbox
-├── prompts/
-│   ├── phase1-audit.md           # Universal read-only audit prompt -> JSON backlog
-│   ├── phase2-execute.md         # Universal atomic task execution prompt
-│   ├── phase2-claude-fix.md      # Legacy Claude fix prompt
-│   ├── phase2-agy-digest.md      # Fast execution prompt for agy
-│   └── phase3-repair.md          # Universal auto-repair prompt
-├── src/
-│   ├── cli.ts                    # Entrypoint: interactive TUI default + subcommands
-│   ├── ui/
-│   │   ├── interactive-menu.ts   # First-run wizard + contextual project menu
-│   │   └── formatters.ts         # Tables & boxes for banners, quotas, and wave timelines
-│   ├── config/
-│   │   ├── schema.ts             # GlobalConfigSchema, MachineStateSchema, TaskSchema
-│   │   ├── global-store.ts       # Atomic ~/.wet/ store & single active project enforcement
-│   │   └── loader.ts             # Project config loader & quality gates auto-detection
-│   ├── core/
-│   │   ├── orchestrator.ts       # Wave coordinator & multi-pass executor
-│   │   ├── dag-scheduler.ts      # Disjoint file locking & topological execution
-│   │   ├── circuit-breaker.ts    # Anti-loop & consecutive failure detection
-│   │   └── quality-gates.ts      # Multi-stage gate runner with auto-repair loop
-│   ├── git/
-│   │   └── git-manager.ts        # Pre-flight checks, isolated worktrees, post-audit cleanup
-│   ├── adapters/
-│   │   ├── agent-adapter.ts      # Universal AgentAdapter interface & usage parser
-│   │   ├── registry.ts           # Adapter factory (claude, codex, agy, gemini, custom)
-│   │   ├── claude-adapter.ts     # Claude Code adapter (PTY usage probe + NDJSON stream)
-│   │   ├── codex-adapter.ts      # OpenAI Codex CLI adapter (--sandbox read-only / write)
-│   │   ├── agy-adapter.ts        # Antigravity CLI adapter (PTY + issue #318 watchdog)
-│   │   ├── gemini-adapter.ts     # Gemini CLI adapter (JSON stream + rate limit detection)
-│   │   └── custom-adapter.ts     # Generic YAML-configurable CLI wrapper
-│   ├── scheduler/
-│   │   ├── wave-planner.ts       # Pure wave calculation, lead time, and action planner
-│   │   ├── calibration-engine.ts # Built-in presets, benchmarks cache, and EMA calibration
-│   │   ├── watcher.ts            # wet watch runner (PID lock, wave execution, state transitions)
-│   │   └── service-installer.ts  # systemd --user timer & cron installer
-│   ├── telemetry/
-│   │   ├── quota-guard.ts        # Sliding-window JSONL scanner for Claude
-│   │   ├── burn-profiler.ts      # Heuristic task anomaly profiler
-│   │   └── reporter.ts           # Markdown report generator (.wet/REPORT-YYYYMMDD.md)
-│   └── utils/
-│       └── logger.ts             # Structured JSON & console logger (pino + pino-pretty)
-└── tests/                        # 12 test suites, 53 unit tests passing
-```
+### 5. Multi-Stage Quality Gates & Self-Repair
+Every code change must satisfy strict automated verification:
+- Automatic detection of project toolchains (TypeScript `tsc`, ESLint, Prettier, Jest/Vitest, Cargo, Pytest, Go test).
+- 3-Phase verification: Typecheck $\rightarrow$ Lint $\rightarrow$ Unit Tests & Coverage.
+- Autonomous Auto-Repair: On gate failure, provides the compiler/test error diff back to the AI adapter for up to 3 repair attempts before tripping the circuit breaker.
 
 ---
 
-## Installation & Quick Start
+## Installation
 
-### Build and link globally
+### Prerequisites
+- **Node.js**: version 20.x or higher
+- **pnpm**: version 8.x or higher (or `npm`)
+- **Git**: version 2.28 or higher
+- An active AI CLI tool in your `PATH` (`claude`, `codex`, `agy`, or `gemini`)
 
+### Global Setup
+
+Clone and install dependencies:
 ```bash
 git clone https://github.com/pussilemon/WorthEveryToken.git
 cd WorthEveryToken
 pnpm install
 pnpm run build
-pnpm link --global
+npm link
 ```
 
-### Launch Interactive TUI
+Verify installation:
+```bash
+wet --version
+wet --help
+```
 
-Simply type:
+---
+
+## Usage
+
+### 1. Interactive TUI (Recommended)
+Simply run `wet` without arguments to launch the interactive terminal interface:
 ```bash
 wet
 ```
-- On first launch, the wizard will guide you through provider selection and background service installation.
-- In any Git repository, typing `wet` presents options to arm the project, inspect computed waves, or start an immediate session.
+- **First Launch**: Automatically detects installed AI CLIs in your `PATH`, lets you configure your primary provider and subscription tier, performs a live quota probe, and offers to set up the background watcher.
+- **Repository Context**: Inside any Git repository, `wet` displays current quota status, computed wave timelines, and options to arm the project, run an immediate audit, or execute tasks.
+
+### 2. Arming a Repository
+WorthEveryToken enforces a single active project per machine to avoid concurrent quota competition:
+```bash
+cd /path/to/my-repo
+wet arm
+```
+To switch active projects:
+```bash
+wet arm --force
+```
+To disarm:
+```bash
+wet disarm
+```
+
+### 3. Probing Usage & Wave Plan
+Inspect your provider's live quota, detected topology, and computed execution timeline:
+```bash
+wet probe
+```
+
+### 4. Direct CLI Execution
+You can run audits and execution waves directly from the terminal:
+```bash
+# Initialize project config and auto-detect quality gates
+wet init
+
+# Run Phase 1 read-only codebase audit
+wet audit
+
+# Run full audit and task execution pipeline
+wet run
+
+# Resume previous run without restarting finished tasks
+wet run --resume
+
+# Check backlog status and progress
+wet status
+
+# View latest Markdown telemetry report
+wet report
+
+# Clean up temporary worktrees and branches
+wet cleanup
+```
 
 ---
 
-## CLI Reference
+## Background Daemon & SSH Headless Setup
 
-| Command | Description |
-|---|---|
-| `wet` | Launches interactive TUI (wizard or project menu) |
-| `wet watch` | Runs one background tick (invoked every 15 min by systemd/cron) |
-| `wet arm [--force]` | Arms current repository as the active project |
-| `wet disarm` | Cancels scheduled wave execution |
-| `wet probe` | Interrogates provider CLI for live usage and prints wave timeline |
-| `wet service install` | Installs `systemd --user` timer (or cron job) |
-| `wet service uninstall`| Uninstalls background watcher service |
-| `wet service status` | Checks background watcher status |
-| `wet audit` | Runs Phase 1 read-only codebase audit |
-| `wet run [--resume]` | Runs audit + fix pipeline directly |
-| `wet status` | Displays backlog status and quota summary |
-| `wet report` | Prints latest Markdown report |
-| `wet cleanup` | Prunes orphan worktrees and branches |
+To run `wet` unattended on Linux servers and developer workstations without keeping terminal sessions open:
 
----
+### Install Service
+```bash
+wet service install
+```
+This registers a `systemd --user` timer (`wet-watch.timer`) that runs every 15 minutes with zero resident RAM consumption when idle. On non-systemd environments, it automatically configures a user cron job.
 
-## Background Watcher on Linux (SSH Sessions)
-
-When using `systemd --user`, ensure lingering is enabled so timers persist after closing SSH:
-
+### Persistent SSH Sessions (Linger)
+For headless servers and SSH connections, enable systemd lingering so timers run even after disconnecting:
 ```bash
 loginctl enable-linger $USER
 ```
 
-Check timer status:
+### Manage Service
 ```bash
-systemctl --user list-timers | grep wet
-```
+# Check service status
+wet service status
 
-View watcher execution logs:
-```bash
-journalctl --user -u wet-watch.service -n 50 --no-pager
+# Inspect systemd timer
+systemctl --user list-timers | grep wet
+
+# Tail service execution logs
+journalctl --user -u wet-watch.service -n 50 -f
+
+# Uninstall background service
+wet service uninstall
 ```
 
 ---
 
-## Verification & Testing
+## Configuration
 
-```bash
-pnpm run typecheck    # Strict TypeScript verification
-pnpm run lint         # ESLint check (0 warnings enforced)
-pnpm test             # Vitest test suite (53 tests)
-pnpm run build        # Production build to dist/
+Global settings are stored in `~/.wet/config.yaml`. Project-level overrides can be placed in `wet.config.yaml` at your repository root:
+
+```yaml
+project:
+  root: "."
+  base_branch: "main"
+  audit_branch_prefix: "ai-weekend-audit"
+  worktree_dir: ".wet/worktrees"
+  max_parallel_workers: 1
+
+limits:
+  max_total_tasks: 25
+  max_retries_per_task: 3
+  max_consecutive_failures: 3
+  claude_max_turns_per_task: 18
+  claude_max_budget_usd_per_task: 2.5
+  stop_at_five_hour_quota_pct: 90
+  stop_at_weekly_quota_pct: 95
+
+quality_gates:
+  auto_detect: true
+  gate_timeout_sec: 120
 ```
 
-License: MIT
+---
+
+## Development & Verification
+
+Run the full verification pipeline:
+```bash
+pnpm run typecheck    # Strict TypeScript checks (noUncheckedIndexedAccess)
+pnpm run lint         # ESLint (0 errors, 0 warnings enforced)
+pnpm test             # 18 test suites, 110 unit tests
+pnpm run build        # Production compile to dist/
+```
+
+---
+
+## License
+
+MIT

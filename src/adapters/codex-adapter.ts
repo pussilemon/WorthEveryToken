@@ -103,7 +103,8 @@ export class CodexAdapter implements AgentAdapter {
     return this.execute(prompt, {
       ...options,
       cwd: workdir,
-      allowedTools: "read-only"
+      allowedTools: "read-only",
+      phase: "audit"
     });
   }
 
@@ -111,7 +112,8 @@ export class CodexAdapter implements AgentAdapter {
     return this.execute(prompt, {
       ...options,
       cwd: workdir,
-      allowedTools: "workspace-write"
+      allowedTools: "workspace-write",
+      phase: "execute"
     });
   }
 
@@ -119,13 +121,15 @@ export class CodexAdapter implements AgentAdapter {
     return this.execute(prompt, {
       ...options,
       cwd: workdir,
-      allowedTools: "workspace-write"
+      allowedTools: "workspace-write",
+      phase: "repair"
     });
   }
 
   public async execute(prompt: string, options: AgentExecutionOptions): Promise<ExecutionResult> {
     const startTime = Date.now();
     const isReadOnly = options.allowedTools === "read-only";
+    const phase = options.phase ?? (isReadOnly ? "audit" : "execute");
 
     const args = ["exec"];
     if (isReadOnly) {
@@ -133,11 +137,19 @@ export class CodexAdapter implements AgentAdapter {
     } else {
       args.push("--sandbox", "workspace-write", "--full-auto");
     }
+    args.push("--json");
 
     if (options.model) {
-      args.push("--model", options.model);
+      args.push("-m", options.model);
     }
-    args.push("-p", prompt);
+
+    let input: string | undefined = undefined;
+    if (prompt.length > 32 * 1024) {
+      args.push("-");
+      input = prompt;
+    } else {
+      args.push(prompt);
+    }
 
     let fullOutput = "";
     let fullStderr = "";
@@ -167,6 +179,7 @@ export class CodexAdapter implements AgentAdapter {
         cwd: options.cwd,
         timeout: effectiveTimeoutMs,
         cleanup: true,
+        input,
         env: {
           ...process.env,
           CI: "1"
@@ -177,7 +190,7 @@ export class CodexAdapter implements AgentAdapter {
         const str = chunk.toString();
         fullOutput += str;
         options.onChunk?.(str);
-        if (/rate[_\s]limit|429|quota/i.test(str)) {
+        if (/rate[_\s]limit|429|quota|usage limit|too many requests/i.test(str)) {
           rateLimited = true;
           if (/weekly/i.test(str)) rateLimitType = "weekly";
           else rateLimitType = "5h";
@@ -189,7 +202,7 @@ export class CodexAdapter implements AgentAdapter {
       subprocess.stderr?.on("data", (chunk: Buffer) => {
         const str = chunk.toString();
         fullStderr += str;
-        if (/rate[_\s]limit|429|quota/i.test(str)) {
+        if (/rate[_\s]limit|429|quota|usage limit|too many requests/i.test(str)) {
           rateLimited = true;
           if (/weekly/i.test(str)) rateLimitType = "weekly";
           else rateLimitType = "5h";
@@ -229,10 +242,27 @@ export class CodexAdapter implements AgentAdapter {
       }
 
       if (result.exitCode === 0 && signal.status === "DONE") {
+        if (phase === "audit" || phase === "repair" || digest !== null) {
+          return {
+            exitCode: 0,
+            status: "DONE",
+            digest,
+            output: fullOutput,
+            metrics: { durationMs }
+          };
+        }
+
+        // Phase === "execute" with missing digest: provide synthetic fallback
+        logger.warn({ taskId: options.taskId }, "Codex finished with status=DONE but missing <WET_DIGEST>. Generating synthetic fallback digest.");
         return {
           exitCode: 0,
           status: "DONE",
-          digest,
+          digest: {
+            files_changed: [],
+            summary: "Completed without structured digest",
+            tests_added: 0,
+            risks: []
+          },
           output: fullOutput,
           metrics: { durationMs }
         };
@@ -248,6 +278,26 @@ export class CodexAdapter implements AgentAdapter {
       };
     } catch (err: any) {
       const durationMs = Date.now() - startTime;
+      const errCombined = `${fullOutput}\n${fullStderr}\n${err?.stdout ?? ""}\n${err?.stderr ?? ""}\n${err?.message ?? ""}`;
+      const isRateLimit =
+        /rate[_\s]limit|429|quota|usage limit|too many requests/i.test(errCombined) ||
+        err?.exitCode === 429;
+
+      if (isRateLimit) {
+        const parsed = parseUsageText(errCombined);
+        const isWeekly = errCombined.toLowerCase().includes("weekly");
+        return {
+          exitCode: 429,
+          status: "RATE_LIMITED",
+          digest: null,
+          output: fullOutput || errCombined,
+          error: err?.message || "Rate limit reached in codex",
+          rateLimitReset: parsed.window5hResetAt?.toISOString() ?? parsed.weeklyResetAt?.toISOString(),
+          rateLimitType: isWeekly ? "weekly" : "5h",
+          metrics: { durationMs }
+        };
+      }
+
       return {
         exitCode: err?.exitCode ?? 1,
         status: "FAILED",

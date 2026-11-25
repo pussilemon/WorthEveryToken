@@ -17,6 +17,7 @@ export class GitManager {
   public readonly auditBranch: string;
   public readonly worktreeDir: string;
   public readonly auditHeadDir: string;
+  public readonly auditWorktreePath: string;
   private integrationMutex: Promise<void> = Promise.resolve();
 
   constructor(options: GitManagerOptions = {}) {
@@ -26,6 +27,7 @@ export class GitManager {
     this.auditBranch = `${options.auditBranchPrefix ?? "ai-weekend-audit"}-${dateStr}`;
     this.worktreeDir = path.resolve(this.repoRoot, options.worktreeDir ?? ".wet/worktrees");
     this.auditHeadDir = path.resolve(this.repoRoot, ".wet/audit-head");
+    this.auditWorktreePath = path.resolve(this.repoRoot, ".wet/audit-worktree");
   }
 
   private async execGit(args: string[], cwd = this.repoRoot): Promise<{ stdout: string; stderr: string }> {
@@ -39,22 +41,65 @@ export class GitManager {
     await this.execGit(["rev-parse", "--git-dir"]);
   }
 
-  public async ensureCleanPostAudit(): Promise<void> {
-    // If audit was executed in repoRoot and created unstaged files, clean them up
-    const { stdout } = await this.execGit(["status", "--porcelain"]);
-    const dirtyLines = stdout
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0 && !l.includes(".wet"));
+  public async createAuditWorktree(): Promise<string> {
+    await this.removeAuditWorktree();
+    fs.mkdirSync(path.dirname(this.auditWorktreePath), { recursive: true });
 
-    if (dirtyLines.length > 0) {
-      logger.warn(
-        { dirtyFiles: dirtyLines },
-        "Audit modified files in working directory despite read-only mode! Reverting changes..."
-      );
-      await this.execGit(["reset", "--hard", "HEAD"]);
-      await this.execGit(["clean", "-fd"]);
+    let baseRef = this.baseBranch;
+    try {
+      await this.execGit(["rev-parse", "--verify", baseRef]);
+    } catch {
+      baseRef = "HEAD";
     }
+
+    try {
+      await this.execGit(["worktree", "add", "--detach", this.auditWorktreePath, baseRef]);
+    } catch {
+      await this.execGit(["worktree", "prune"]);
+      await this.execGit(["worktree", "add", "--detach", "--force", this.auditWorktreePath, baseRef]);
+    }
+
+    this.linkDependencyDirectories(this.auditWorktreePath);
+    return this.auditWorktreePath;
+  }
+
+  public async removeAuditWorktree(): Promise<void> {
+    if (fs.existsSync(this.auditWorktreePath)) {
+      try {
+        const { stdout } = await this.execGit(["status", "--porcelain"], this.auditWorktreePath);
+        if (stdout.trim().length > 0) {
+          logger.warn(
+            { modifications: stdout.trim() },
+            "Audit agent attempted modifications inside isolated audit worktree! Changes discarded safely."
+          );
+        }
+      } catch {
+        // Ignore
+      }
+
+      this.unlinkDependencyDirectories(this.auditWorktreePath);
+      try {
+        await this.execGit(["worktree", "remove", "--force", this.auditWorktreePath]);
+      } catch {
+        try {
+          fs.rmSync(this.auditWorktreePath, { recursive: true, force: true });
+        } catch {
+          // Ignore
+        }
+      }
+
+      try {
+        await this.execGit(["worktree", "prune"]);
+      } catch {
+        // Ignore
+      }
+    }
+  }
+
+  public async ensureCleanPostAudit(): Promise<void> {
+    // Zero-Touch Git: Non-destructive no-op.
+    // Phase 1 Audit runs entirely in an isolated detached worktree (.wet/audit-worktree).
+    // repoRoot is NEVER modified or reset.
   }
 
   public async initAuditBranch(resume = false): Promise<string> {

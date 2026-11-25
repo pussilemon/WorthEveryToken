@@ -3,14 +3,46 @@ import path from "node:path";
 import yaml from "yaml";
 import { ConfigSchema, type WetConfig, type Backlog, BacklogSchema, type QualityGateCommand } from "./schema.js";
 
-export function loadConfig(configPath = "wet.config.yaml"): WetConfig {
-  if (!fs.existsSync(configPath)) {
-    return ConfigSchema.parse({});
+export function getWetDir(repoRoot: string): string {
+  return path.resolve(repoRoot, ".wet");
+}
+
+export function loadConfig(configPathOrDir = "wet.config.yaml"): WetConfig {
+  const resolved = path.resolve(configPathOrDir);
+  let configFile = resolved;
+  let targetRoot = path.dirname(resolved);
+
+  if (fs.existsSync(resolved)) {
+    try {
+      const stat = fs.statSync(resolved);
+      if (stat.isDirectory()) {
+        targetRoot = resolved;
+        configFile = path.join(resolved, "wet.config.yaml");
+      }
+    } catch {
+      // Ignore
+    }
   }
 
-  const raw = fs.readFileSync(configPath, "utf-8");
-  const parsed = yaml.parse(raw);
-  return ConfigSchema.parse(parsed ?? {});
+  if (!fs.existsSync(configFile)) {
+    const defaultConfig = ConfigSchema.parse({});
+    defaultConfig.project.root = targetRoot;
+    return defaultConfig;
+  }
+
+  try {
+    const raw = fs.readFileSync(configFile, "utf-8");
+    const parsed = yaml.parse(raw);
+    const config = ConfigSchema.parse(parsed ?? {});
+    if (!path.isAbsolute(config.project.root)) {
+      config.project.root = path.resolve(targetRoot, config.project.root);
+    }
+    return config;
+  } catch {
+    const defaultConfig = ConfigSchema.parse({});
+    defaultConfig.project.root = targetRoot;
+    return defaultConfig;
+  }
 }
 
 export function autoDetectQualityGates(projectRoot: string): QualityGateCommand[] {

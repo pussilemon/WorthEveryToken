@@ -149,4 +149,35 @@ describe("DagScheduler", () => {
 
     expect(tasks[0]?.status).toBe("skipped");
   });
+
+  it("should handle aborted task cleanly without cascade-skipping dependents, enabling successful resume", async () => {
+    const scheduler = new DagScheduler({ maxParallelWorkers: 2 });
+    const tasks: Task[] = [
+      createMockTask({ id: "T-001", target_files: ["src/a.ts"] }),
+      createMockTask({ id: "T-002", depends_on: ["T-001"], target_files: ["src/b.ts"] })
+    ];
+
+    // First run: T-001 encounters rate-limit / external abort
+    await scheduler.runScheduler(tasks, async (task) => {
+      if (task.id === "T-001") {
+        return "aborted";
+      }
+      return "completed";
+    });
+
+    // Verification: T-001 and dependent T-002 must remain "pending" (NOT skipped or failed!)
+    expect(tasks[0]?.status).toBe("pending");
+    expect(tasks[1]?.status).toBe("pending");
+
+    // Second run: session resumes on next wave when quota is unlocked
+    const executedInWave2: string[] = [];
+    await scheduler.runScheduler(tasks, async (task) => {
+      executedInWave2.push(task.id);
+      return "completed";
+    });
+
+    expect(executedInWave2).toEqual(["T-001", "T-002"]);
+    expect(tasks[0]?.status).toBe("completed");
+    expect(tasks[1]?.status).toBe("completed");
+  });
 });

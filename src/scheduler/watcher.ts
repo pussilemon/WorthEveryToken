@@ -266,12 +266,62 @@ export async function runWatchTick(): Promise<WatchTickResult> {
 
     const waveResult = await orchestrator.runWave({
       hardStopAt: plan.hardStopAt,
-      resume: true
+      selectedModel: plan.selectedModel,
+      resume: true,
+      onBeforeTaskCheck: async () => {
+        const checkNow = new Date();
+        // 1. Level 1: Hard stop fit check
+        const fit = CycleGuard.canStartNextTask({
+          now: checkNow,
+          hardStopAt: plan.hardStopAt,
+          minTaskReserveMinutes: globalConfig.schedule.min_task_reserve_minutes
+        });
+        if (!fit.allowed) {
+          return { allowed: false, reason: fit.reason };
+        }
+
+        // 2. Level 3: Early reset check
+        if (lockedResetAt) {
+          const early = CycleGuard.checkEarlyReset({
+            lockedCycleResetAt: new Date(lockedResetAt),
+            cyclePeakUsedPct: newPeakPct,
+            currentResetAt,
+            currentUsedPct,
+            now: checkNow
+          });
+          if (early.abort) {
+            return { allowed: false, reason: early.reason };
+          }
+        }
+
+        // 3. User activity guard
+        const activity = await checkUserActivity(
+          activeProject.repoPath,
+          globalConfig.provider,
+          globalConfig,
+          hoursUntilReset
+        );
+        if (activity.active) {
+          return { allowed: false, reason: `YIELDED_TO_USER: ${activity.reason}` };
+        }
+
+        return { allowed: true };
+      }
     });
 
     logger.info({ outcome: waveResult.outcome, reason: waveResult.stopReason }, "Wave execution finished");
 
-    if (waveResult.outcome === "RATE_LIMITED_5H") {
+    if (waveResult.outcome === "YIELDED_TO_USER") {
+      updateActiveProject({
+        status: "yielded_to_user",
+        nextWakeAt: new Date(Date.now() + 15 * 60_000).toISOString()
+      });
+    } else if (waveResult.outcome === "EARLY_RESET_DETECTED") {
+      updateActiveProject({
+        status: "completed_cycle",
+        nextWakeAt: null
+      });
+    } else if (waveResult.outcome === "RATE_LIMITED_5H") {
       const postUsage = await adapter.probeUsage();
       if (
         usage.weeklyUsedPct !== null &&

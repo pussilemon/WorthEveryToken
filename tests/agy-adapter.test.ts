@@ -95,4 +95,31 @@ exit 0
     expect(digest?.files_changed).toEqual(["src/foo.ts"]);
     expect(digest?.summary).toBe("Cleaned types");
   });
+
+  it("should successfully complete runAudit() and runRepair() without requiring <WET_DIGEST>", async () => {
+    const auditScriptPath = path.join(tmpDir, "mock-audit-agy.sh");
+    fs.writeFileSync(
+      auditScriptPath,
+      `#!/bin/bash
+echo '<WET_BACKLOG_JSON>{"project":"test","generated_at":"2026-11-25T10:00:00.000Z","base_branch":"main","audit_branch":"ai-audit","tasks":[]}</WET_BACKLOG_JSON>'
+echo '<WET_EXIT_SIGNAL status="DONE"/>'
+exit 0
+`,
+      { mode: 0o755 }
+    );
+
+    const adapter = new AgyAdapter({
+      binary: auditScriptPath,
+      usePty: true,
+      silenceWatchdogSec: 5,
+      wallClockTimeoutSec: 10
+    });
+
+    const auditResult = await adapter.runAudit("Run audit", tmpDir);
+    expect(auditResult.status).toBe("DONE");
+    expect(auditResult.digest).toBeNull();
+
+    const repairResult = await adapter.runRepair("Run repair", tmpDir);
+    expect(repairResult.status).toBe("DONE");
+  });
 });

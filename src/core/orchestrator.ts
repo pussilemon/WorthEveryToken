@@ -11,8 +11,8 @@ import { CycleGuard } from "../scheduler/cycle-guard.js";
 import { QuotaGuard } from "../telemetry/quota-guard.js";
 import { BurnProfiler } from "../telemetry/burn-profiler.js";
 import { Reporter } from "../telemetry/reporter.js";
-import { compilePrompt, loadBacklog, saveBacklog } from "../config/loader.js";
-import { parseBacklogJson, parseFixPlanMd } from "../adapters/agent-adapter.js";
+import { compilePrompt, loadBacklog, saveBacklog, getWetDir } from "../config/loader.js";
+import { parseBacklogJson, parseFixPlanMd, type ExecutionResult } from "../adapters/agent-adapter.js";
 import { logger } from "../utils/logger.js";
 
 export interface OrchestratorRunOptions {
@@ -21,10 +21,20 @@ export interface OrchestratorRunOptions {
   maxBudget?: number;
   resume?: boolean;
   hardStopAt?: Date;
+  selectedModel?: string | null;
+  onBeforeTaskCheck?: () => Promise<{ allowed: boolean; reason?: string }>;
 }
 
 export interface WaveRunResult {
-  outcome: "COMPLETED" | "RATE_LIMITED_5H" | "RATE_LIMITED_WEEKLY" | "HARD_STOP_REACHED" | "CIRCUIT_BREAKER" | "STOPPED";
+  outcome:
+    | "COMPLETED"
+    | "RATE_LIMITED_5H"
+    | "RATE_LIMITED_WEEKLY"
+    | "HARD_STOP_REACHED"
+    | "CIRCUIT_BREAKER"
+    | "STOPPED"
+    | "EARLY_RESET_DETECTED"
+    | "YIELDED_TO_USER";
   stopReason: string;
   tasksCompleted: number;
   tasksFailed: number;
@@ -45,6 +55,7 @@ export class Orchestrator {
 
   constructor(config: WetConfig, adapter?: AgentAdapter) {
     this.config = config;
+    const wetDir = getWetDir(config.project.root);
     this.gitManager = new GitManager({
       repoRoot: config.project.root,
       baseBranch: config.project.base_branch,
@@ -68,11 +79,14 @@ export class Orchestrator {
       maxConsecutiveFailures: config.limits.max_consecutive_failures
     });
 
-    this.quotaGuard = new QuotaGuard({
-      claudeMaxSessionBudgetUsd: config.limits.claude_max_session_budget_usd,
-      stopAtFiveHourQuotaPct: config.limits.stop_at_five_hour_quota_pct,
-      stopAtWeeklyQuotaPct: config.limits.stop_at_weekly_quota_pct
-    });
+    this.quotaGuard = new QuotaGuard(
+      {
+        claudeMaxSessionBudgetUsd: config.limits.claude_max_session_budget_usd,
+        stopAtFiveHourQuotaPct: config.limits.stop_at_five_hour_quota_pct,
+        stopAtWeeklyQuotaPct: config.limits.stop_at_weekly_quota_pct
+      },
+      path.join(wetDir, "quota-state.json")
+    );
 
     this.burnProfiler = new BurnProfiler();
   }
@@ -81,18 +95,27 @@ export class Orchestrator {
     const max = maxTasks ?? this.config.limits.max_total_tasks;
     logger.info({ maxTasks: max, provider: this.adapter.provider }, "Starting Phase 1 Read-Only Codebase Audit");
 
-    const auditPrompt = compilePrompt("prompts/phase1-audit.md", {
-      REPO_PATH: path.resolve(this.config.project.root),
-      MAX_TASKS: String(max)
-    });
+    const wetDir = getWetDir(this.config.project.root);
+    fs.mkdirSync(wetDir, { recursive: true });
 
-    const result = await this.adapter.runAudit(auditPrompt, this.config.project.root, {
-      model: this.config.claude?.audit_model,
-      allowedTools: "Read,Glob,Grep"
-    });
+    const auditWorktreePath = await this.gitManager.createAuditWorktree();
+    let result: ExecutionResult;
 
-    // Revert any unintended file changes made during read-only audit
-    await this.gitManager.ensureCleanPostAudit();
+    try {
+      const auditPrompt = compilePrompt("prompts/phase1-audit.md", {
+        REPO_PATH: path.resolve(auditWorktreePath),
+        MAX_TASKS: String(max)
+      });
+
+      const modelProfile = this.adapter.getTopModelProfile(this.config as any);
+      result = await this.adapter.runAudit(auditPrompt, auditWorktreePath, {
+        model: modelProfile.model,
+        allowedTools: "Read,Glob,Grep",
+        phase: "audit"
+      });
+    } finally {
+      await this.gitManager.removeAuditWorktree();
+    }
 
     if (result.status === "RATE_LIMITED") {
       throw new Error(`${this.adapter.provider} is rate limited: ${result.rateLimitReset ?? "try again later"}`);
@@ -104,13 +127,11 @@ export class Orchestrator {
     }
 
     // Save tasks.json
-    const tasksPath = path.join(".wet", "tasks.json");
+    const tasksPath = path.join(wetDir, "tasks.json");
     saveBacklog(tasksPath, parsedBacklog);
-    logger.info({ taskCount: parsedBacklog.tasks.length }, "Audit backlog saved to .wet/tasks.json");
+    logger.info({ taskCount: parsedBacklog.tasks.length }, "Audit backlog saved to tasks.json");
 
     // Save fix_plan.md
-    const fixPlanDir = path.join(".wet");
-    fs.mkdirSync(fixPlanDir, { recursive: true });
     const fixPlanMd = parseFixPlanMd(result.output);
     const planContent =
       fixPlanMd ??
@@ -119,8 +140,8 @@ export class Orchestrator {
           .map((t) => `### [${t.id}] ${t.title} (${t.severity} - ${t.assigned_agent ?? this.adapter.provider})\n${t.description}\n`)
           .join("\n");
 
-    fs.writeFileSync(path.join(".wet", "fix_plan.md"), planContent, "utf-8");
-    logger.info("Human-readable plan saved to .wet/fix_plan.md");
+    fs.writeFileSync(path.join(wetDir, "fix_plan.md"), planContent, "utf-8");
+    logger.info("Human-readable plan saved to fix_plan.md");
 
     return parsedBacklog;
   }
@@ -130,12 +151,13 @@ export class Orchestrator {
     await this.gitManager.checkPreflight();
 
     const auditBranch = await this.gitManager.initAuditBranch(options.resume);
-    const tasksPath = path.join(".wet", "tasks.json");
+    const wetDir = getWetDir(this.config.project.root);
+    const tasksPath = path.join(wetDir, "tasks.json");
 
     let backlog: Backlog | null = null;
     if (fs.existsSync(tasksPath)) {
       backlog = loadBacklog(tasksPath);
-      logger.info("Loaded existing backlog from .wet/tasks.json");
+      logger.info("Loaded existing backlog from tasks.json");
     }
 
     if (!backlog) {
@@ -178,12 +200,15 @@ export class Orchestrator {
           }
         }
         saveBacklog(tasksPath, backlog);
-        Reporter.saveReport({
-          auditBranch,
-          durationMs: Date.now() - startTime,
-          stopReason: this.stopReason,
-          backlog
-        });
+        Reporter.saveReport(
+          {
+            auditBranch,
+            durationMs: Date.now() - startTime,
+            stopReason: this.stopReason,
+            backlog
+          },
+          wetDir
+        );
       }
       await this.gitManager.cleanupAll();
       process.exit(0);
@@ -195,7 +220,19 @@ export class Orchestrator {
     await scheduler.runScheduler(backlog.tasks, async (task: Task): Promise<TaskExecutionOutcome> => {
       if (this.stopRequested) {
         task.status = "pending";
-        return "skipped";
+        return "aborted";
+      }
+
+      // Check external safety callback (CycleGuard Level 1 & 3, UserActivityGuard)
+      if (options.onBeforeTaskCheck) {
+        const check = await options.onBeforeTaskCheck();
+        if (!check.allowed) {
+          this.stopRequested = true;
+          this.stopReason = check.reason ?? "Safety check halted execution";
+          logger.warn({ reason: this.stopReason }, "Halting wave before task start");
+          task.status = "pending";
+          return "aborted";
+        }
       }
 
       // Check hardStopAt and CycleGuard fit check before starting a new task
@@ -210,18 +247,20 @@ export class Orchestrator {
           this.stopReason = fitCheck.reason ?? "HARD_STOP_PRE_RESET";
           logger.warn({ reason: this.stopReason }, "Halting wave before task start");
           task.status = "pending";
-          return "skipped";
+          return "aborted";
         }
       }
 
-      // Check Quota Guard limits
-      const quotaCheck = this.quotaGuard.shouldStop();
-      if (quotaCheck.stop) {
-        this.stopRequested = true;
-        this.stopReason = quotaCheck.reason ?? "Quota limit reached";
-        logger.warn({ reason: this.stopReason }, "QuotaGuard safety threshold reached, halting execution");
-        task.status = "pending";
-        return "skipped";
+      // Check Quota Guard limits (ONLY for Claude provider)
+      if (this.adapter.provider === "claude") {
+        const quotaCheck = this.quotaGuard.shouldStop();
+        if (quotaCheck.stop) {
+          this.stopRequested = true;
+          this.stopReason = quotaCheck.reason ?? "Quota limit reached";
+          logger.warn({ reason: this.stopReason }, "QuotaGuard safety threshold reached, halting execution");
+          task.status = "pending";
+          return "aborted";
+        }
       }
 
       // Check Circuit Breaker
@@ -229,10 +268,13 @@ export class Orchestrator {
         this.stopRequested = true;
         this.stopReason = `Circuit Breaker OPEN: ${this.circuitBreaker.getTripReason()}`;
         task.status = "pending";
-        return "skipped";
+        return "aborted";
       }
 
-      logger.info({ taskId: task.id, provider: this.adapter.provider }, "Executing task in isolated worktree");
+      const modelProfile = this.adapter.getTopModelProfile(this.config as any);
+      const effectiveModel = options.selectedModel ?? modelProfile.model;
+
+      logger.info({ taskId: task.id, provider: this.adapter.provider, model: effectiveModel }, "Executing task in isolated worktree");
       const worktreePath = await this.gitManager.createWorktree(task.id);
 
       try {
@@ -255,7 +297,10 @@ export class Orchestrator {
         const result = await this.adapter.runTask(prompt, worktreePath, {
           maxTurns: this.config.limits.claude_max_turns_per_task,
           maxBudgetUsd: this.config.limits.claude_max_budget_usd_per_task,
-          deadlineAt: options.hardStopAt
+          deadlineAt: options.hardStopAt,
+          model: effectiveModel,
+          taskId: task.id,
+          phase: "execute"
         });
 
         if (result.status === "RATE_LIMITED") {
@@ -266,7 +311,7 @@ export class Orchestrator {
           task.failure_reason = null;
           await this.gitManager.removeWorktree(task.id);
           saveBacklog(tasksPath, backlog);
-          return "skipped";
+          return "aborted";
         }
 
         if (result.status === "BLOCKED") {
@@ -348,19 +393,26 @@ export class Orchestrator {
       }
     });
 
-    const reportPath = Reporter.saveReport({
-      auditBranch,
-      durationMs: Date.now() - startTime,
-      stopReason: this.stopReason,
-      backlog
-    });
+    const reportPath = Reporter.saveReport(
+      {
+        auditBranch,
+        durationMs: Date.now() - startTime,
+        stopReason: this.stopReason,
+        backlog
+      },
+      wetDir
+    );
     logger.info({ reportPath }, "Session completed. Full report generated.");
 
     const completedCount = backlog.tasks.filter((t) => t.status === "completed").length;
     const failedCount = backlog.tasks.filter((t) => t.status === "failed").length;
 
     let outcome: WaveRunResult["outcome"] = "COMPLETED";
-    if (this.rateLimitType === "5h" || this.stopReason.includes("5h")) {
+    if (this.stopReason.includes("YIELDED_TO_USER")) {
+      outcome = "YIELDED_TO_USER";
+    } else if (this.stopReason.includes("EARLY_RESET_DETECTED")) {
+      outcome = "EARLY_RESET_DETECTED";
+    } else if (this.rateLimitType === "5h" || this.stopReason.includes("5h")) {
       outcome = "RATE_LIMITED_5H";
     } else if (this.rateLimitType === "weekly" || this.stopReason.includes("weekly")) {
       outcome = "RATE_LIMITED_WEEKLY";

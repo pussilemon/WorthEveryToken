@@ -20,8 +20,11 @@ export class Reporter {
     const skipped = backlog.tasks.filter((t) => t.status === "skipped");
     const pending = backlog.tasks.filter((t) => t.status === "pending" || t.status === "in_progress");
 
-    const claudeCount = completed.filter((t) => t.metrics?.agent_used === "claude" || t.assigned_agent === "claude").length;
-    const agyCount = completed.filter((t) => t.metrics?.agent_used === "agy" && !t.metrics?.fallback_triggered).length;
+    const providerCounts: Record<string, number> = {};
+    for (const t of completed) {
+      const agent = t.metrics?.agent_used ?? t.assigned_agent ?? "unknown";
+      providerCounts[agent] = (providerCounts[agent] ?? 0) + 1;
+    }
     const fallbackCount = backlog.tasks.filter((t) => t.metrics?.fallback_triggered).length;
 
     let md = `# WorthEveryToken (wet) Autonomous Audit Execution Report\n\n`;
@@ -67,9 +70,15 @@ export class Reporter {
     }
 
     md += `## 4. Telemetry & Routing Metrics\n\n`;
-    md += `- **Claude Code Executions:** ${claudeCount}\n`;
-    md += `- **Antigravity CLI (agy) Executions:** ${agyCount}\n`;
-    md += `- **Fallback Triggers (agy -> Claude):** ${fallbackCount}\n`;
+    const entries = Object.entries(providerCounts);
+    if (entries.length === 0) {
+      md += `- **Provider Executions:** None in this wave\n`;
+    } else {
+      for (const [provider, count] of entries) {
+        md += `- **${provider} Executions:** ${count}\n`;
+      }
+    }
+    md += `- **Fallback Triggers:** ${fallbackCount}\n`;
     md += `- **Pending Tasks Remaining in Backlog:** ${pending.length}\n\n`;
 
     return md;

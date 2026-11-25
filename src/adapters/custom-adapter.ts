@@ -9,6 +9,7 @@ import {
   parseUsageText
 } from "./agent-adapter.js";
 import type { CustomProviderConfig, WetGlobalConfig } from "../config/schema.js";
+import { logger } from "../utils/logger.js";
 
 export class CustomAdapter implements AgentAdapter {
   public readonly provider = "custom" as const;
@@ -77,17 +78,17 @@ export class CustomAdapter implements AgentAdapter {
 
   public async runAudit(prompt: string, workdir: string, options: AgentExecutionOptions = {}): Promise<ExecutionResult> {
     const args = this.replacePrompt(this.config.audit_args, prompt);
-    return this.executeArgs(args, { ...options, cwd: workdir });
+    return this.executeArgs(args, { ...options, cwd: workdir, phase: "audit" });
   }
 
   public async runTask(prompt: string, workdir: string, options: AgentExecutionOptions = {}): Promise<ExecutionResult> {
     const args = this.replacePrompt(this.config.exec_args, prompt);
-    return this.executeArgs(args, { ...options, cwd: workdir });
+    return this.executeArgs(args, { ...options, cwd: workdir, phase: "execute" });
   }
 
   public async runRepair(prompt: string, workdir: string, options: AgentExecutionOptions = {}): Promise<ExecutionResult> {
     const args = this.replacePrompt(this.config.exec_args, prompt);
-    return this.executeArgs(args, { ...options, cwd: workdir });
+    return this.executeArgs(args, { ...options, cwd: workdir, phase: "repair" });
   }
 
   private async executeArgs(args: string[], options: AgentExecutionOptions): Promise<ExecutionResult> {
@@ -171,11 +172,28 @@ export class CustomAdapter implements AgentAdapter {
         };
       }
 
-      if (exitCode === 0 && signal.status === "DONE" && digest !== null) {
+      if (exitCode === 0 && signal.status === "DONE") {
+        const phase = options.phase ?? "execute";
+        if (phase === "audit" || phase === "repair" || digest !== null) {
+          return {
+            exitCode: 0,
+            status: "DONE",
+            digest,
+            output: combined,
+            metrics: { durationMs }
+          };
+        }
+
+        logger.warn({ taskId: options.taskId }, "Custom provider finished with status=DONE but missing <WET_DIGEST>. Generating synthetic fallback digest.");
         return {
           exitCode: 0,
           status: "DONE",
-          digest,
+          digest: {
+            files_changed: [],
+            summary: "Completed without structured digest",
+            tests_added: 0,
+            risks: []
+          },
           output: combined,
           metrics: { durationMs }
         };

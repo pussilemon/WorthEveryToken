@@ -9,6 +9,7 @@ import {
   parseUsageText
 } from "./agent-adapter.js";
 import type { WetGlobalConfig } from "../config/schema.js";
+import { logger } from "../utils/logger.js";
 
 export interface GeminiAdapterConfig {
   binary?: string;
@@ -67,21 +68,24 @@ export class GeminiAdapter implements AgentAdapter {
   public async runAudit(prompt: string, workdir: string, options: AgentExecutionOptions = {}): Promise<ExecutionResult> {
     return this.execute(prompt, {
       ...options,
-      cwd: workdir
+      cwd: workdir,
+      phase: "audit"
     });
   }
 
   public async runTask(prompt: string, workdir: string, options: AgentExecutionOptions = {}): Promise<ExecutionResult> {
     return this.execute(prompt, {
       ...options,
-      cwd: workdir
+      cwd: workdir,
+      phase: "execute"
     });
   }
 
   public async runRepair(prompt: string, workdir: string, options: AgentExecutionOptions = {}): Promise<ExecutionResult> {
     return this.execute(prompt, {
       ...options,
-      cwd: workdir
+      cwd: workdir,
+      phase: "repair"
     });
   }
 
@@ -189,11 +193,28 @@ export class GeminiAdapter implements AgentAdapter {
         };
       }
 
-      if (exitCode === 0 && signal.status === "DONE" && digest !== null) {
+      if (exitCode === 0 && signal.status === "DONE") {
+        const phase = options.phase ?? "execute";
+        if (phase === "audit" || phase === "repair" || digest !== null) {
+          return {
+            exitCode: 0,
+            status: "DONE",
+            digest,
+            output: textToParse,
+            metrics: { durationMs }
+          };
+        }
+
+        logger.warn({ taskId: options.taskId }, "Gemini finished with status=DONE but missing <WET_DIGEST>. Generating synthetic fallback digest.");
         return {
           exitCode: 0,
           status: "DONE",
-          digest,
+          digest: {
+            files_changed: [],
+            summary: "Completed without structured digest",
+            tests_added: 0,
+            risks: []
+          },
           output: textToParse,
           metrics: { durationMs }
         };

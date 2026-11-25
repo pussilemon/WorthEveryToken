@@ -4,7 +4,7 @@ import { Command } from "commander";
 import fs from "node:fs";
 import path from "node:path";
 import yaml from "yaml";
-import { loadConfig, autoDetectQualityGates, loadBacklog } from "./config/loader.js";
+import { loadConfig, autoDetectQualityGates, loadBacklog, getWetDir } from "./config/loader.js";
 import { Orchestrator } from "./core/orchestrator.js";
 import { GitManager } from "./git/git-manager.js";
 import { QuotaGuard } from "./telemetry/quota-guard.js";
@@ -20,7 +20,8 @@ import {
 } from "./config/global-store.js";
 import { getAdapter } from "./adapters/registry.js";
 import { CalibrationEngine } from "./scheduler/calibration-engine.js";
-import { computeWavePlan } from "./scheduler/wave-planner.js";
+import { computeExecutionPlan } from "./scheduler/wave-planner.js";
+import { classifyTopology } from "./scheduler/quota-topology.js";
 import {
   installBackgroundWatcher,
   uninstallBackgroundWatcher,
@@ -35,8 +36,8 @@ const program = new Command();
 
 program
   .name("wet")
-  .description("WorthEveryToken (wet) v2 — Autonomous Multi-Cycle Token Burner & Quota Optimizer")
-  .version("2.0.0");
+  .description("WorthEveryToken (wet) v2.2 — Autonomous Multi-Cycle Token Burner & Quota Optimizer")
+  .version("2.2.0");
 
 // 1. Interactive TUI default when no args are passed
 if (process.argv.length <= 2) {
@@ -117,27 +118,36 @@ if (process.argv.length <= 2) {
         );
 
         const now = new Date();
-        const weeklyResetAt = usage.weeklyResetAt ?? new Date(Date.now() + 24 * 3600_000);
-
-        const plan = computeWavePlan({
-          now,
-          weeklyUsedPct: usage.weeklyUsedPct ?? 0,
-          weeklyResetAt,
-          window5hUsedPct: usage.window5hUsedPct,
-          window5hResetAt: usage.window5hResetAt,
-          weeklyPctPer5hWave,
+        const topology = classifyTopology(usage.buckets);
+        const plan = computeExecutionPlan({
+          topology,
+          calibration: {
+            primaryPctPerSubWindow: weeklyPctPer5hWave
+          },
           config: {
             targetWeeklyBurnPct: globalConfig.schedule.target_weekly_burn_pct,
             windowHours: globalConfig.schedule.window_hours,
             waveBufferMinutes: globalConfig.schedule.wave_buffer_minutes,
-            hardStopBeforeResetMinutes: globalConfig.schedule.hard_stop_before_reset_minutes
-          }
+            hardStopBeforeResetMinutes: globalConfig.schedule.hard_stop_before_reset_minutes,
+            minTaskReserveMinutes: globalConfig.schedule.min_task_reserve_minutes,
+            quietHours: globalConfig.schedule.quiet_hours
+          },
+          now
         });
 
         console.log("\n" + formatUsageReport(usage));
-        console.log(`\n• Calibrazione tasso/5h: ${weeklyPctPer5hWave}% (fonte: ${source})`);
+        console.log(`\n• Topologia rilevata: ${topology.type}`);
+        console.log(`• Calibrazione tasso/finestra: ${weeklyPctPer5hWave}% (fonte: ${source})`);
         console.log(`• Modello top rilevato: ${topModel.model}`);
-        console.log("\n" + formatWaveTimelineTable(plan) + "\n");
+        if (plan.selectedModel) {
+          console.log(`• Modello selezionato nel cascade: ${plan.selectedModel}`);
+        }
+        if (plan.action === "FAIL_CLOSED_UNKNOWN_RESET") {
+          console.log(`\n⚠️  FAIL-CLOSED ATTIVO: ${plan.summary}`);
+          console.log("   Nessun token verrà bruciato finché non è noto con sicurezza l'orario di reset.\n");
+        } else {
+          console.log("\n" + formatWaveTimelineTable(plan) + "\n");
+        }
       } catch (err: any) {
         console.error("Probe error:", err.message);
         process.exit(1);
@@ -287,7 +297,8 @@ if (process.argv.length <= 2) {
       const config = loadConfig();
       const globalConfig = loadGlobalConfig();
       const machineState = loadMachineState();
-      const tasksPath = path.join(".wet", "tasks.json");
+      const wetDir = getWetDir(config.project.root);
+      const tasksPath = path.join(wetDir, "tasks.json");
       const backlog = loadBacklog(tasksPath);
 
       console.log("\n=== WorthEveryToken (wet) Status ===");
@@ -299,7 +310,7 @@ if (process.argv.length <= 2) {
       }
 
       if (!backlog) {
-        console.log("No active backlog found at .wet/tasks.json. Run 'wet audit' or 'wet run' first.");
+        console.log(`No active backlog found at ${tasksPath}. Run 'wet audit' or 'wet run' first.`);
       } else {
         const summary = {
           total: backlog.tasks.length,
@@ -312,11 +323,14 @@ if (process.argv.length <= 2) {
         console.table([summary]);
       }
 
-      const quotaGuard = new QuotaGuard({
-        claudeMaxSessionBudgetUsd: config.limits.claude_max_session_budget_usd,
-        stopAtFiveHourQuotaPct: config.limits.stop_at_five_hour_quota_pct,
-        stopAtWeeklyQuotaPct: config.limits.stop_at_weekly_quota_pct
-      });
+      const quotaGuard = new QuotaGuard(
+        {
+          claudeMaxSessionBudgetUsd: config.limits.claude_max_session_budget_usd,
+          stopAtFiveHourQuotaPct: config.limits.stop_at_five_hour_quota_pct,
+          stopAtWeeklyQuotaPct: config.limits.stop_at_weekly_quota_pct
+        },
+        path.join(wetDir, "quota-state.json")
+      );
 
       const usage = quotaGuard.scanLogs();
       console.log("\n=== Quota & Burn Rate ===");
@@ -330,19 +344,24 @@ if (process.argv.length <= 2) {
     .command("report")
     .description("Generate and output final markdown report")
     .action(() => {
-      const tasksPath = path.join(".wet", "tasks.json");
+      const config = loadConfig();
+      const wetDir = getWetDir(config.project.root);
+      const tasksPath = path.join(wetDir, "tasks.json");
       const backlog = loadBacklog(tasksPath);
       if (!backlog) {
-        console.error("No backlog found at .wet/tasks.json");
+        console.error(`No backlog found at ${tasksPath}`);
         process.exit(1);
       }
 
-      const reportPath = Reporter.saveReport({
-        auditBranch: backlog.audit_branch,
-        durationMs: 0,
-        stopReason: "Manual report request",
-        backlog
-      });
+      const reportPath = Reporter.saveReport(
+        {
+          auditBranch: backlog.audit_branch,
+          durationMs: 0,
+          stopReason: "Manual report request",
+          backlog
+        },
+        wetDir
+      );
 
       console.log(`✓ Report generated: ${reportPath}`);
       const content = fs.readFileSync(reportPath, "utf-8");

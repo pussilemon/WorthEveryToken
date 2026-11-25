@@ -112,8 +112,28 @@ describe("UserActivityGuard (Invisible Mode & Auto-Yield)", () => {
       expect(hasEdits).toBe(false);
     });
 
-    it("should return true when uncommitted dirty files exist in repo", async () => {
-      fs.writeFileSync(path.join(tmpRepo, "user_wip.ts"), "const x = 1;", "utf-8");
+    it("should return false when dirty uncommitted files are older than recentEditMinutes", async () => {
+      const dirtyFilePath = path.join(tmpRepo, "old_wip.ts");
+      fs.writeFileSync(dirtyFilePath, "const old = true;", "utf-8");
+
+      // Backdate mtime by 2 hours (120 minutes > 10 minute threshold)
+      const twoHoursAgo = new Date(Date.now() - 2 * 3600_000);
+      fs.utimesSync(dirtyFilePath, twoHoursAgo, twoHoursAgo);
+
+      // Backdate committed files too
+      fs.utimesSync(path.join(tmpRepo, "README.md"), twoHoursAgo, twoHoursAgo);
+
+      const hasEdits = await hasRecentRepoEdits(tmpRepo, 10);
+      expect(hasEdits).toBe(false);
+    });
+
+    it("should return true when a dirty uncommitted file was touched recently (30 seconds ago)", async () => {
+      const dirtyFilePath = path.join(tmpRepo, "recent_wip.ts");
+      fs.writeFileSync(dirtyFilePath, "const active = true;", "utf-8");
+
+      // Mtime is 30 seconds ago (< 10 minutes)
+      const thirtySecAgo = new Date(Date.now() - 30_000);
+      fs.utimesSync(dirtyFilePath, thirtySecAgo, thirtySecAgo);
 
       const hasEdits = await hasRecentRepoEdits(tmpRepo, 10);
       expect(hasEdits).toBe(true);

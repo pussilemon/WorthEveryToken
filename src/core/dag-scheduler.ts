@@ -7,7 +7,7 @@ export interface SchedulerOptions {
   maxParallelWorkers: number;
 }
 
-export type TaskExecutionOutcome = "completed" | "failed" | "skipped";
+export type TaskExecutionOutcome = "completed" | "failed" | "skipped" | "aborted";
 
 export class DagScheduler {
   private readonly maxWorkers: number;
@@ -189,12 +189,20 @@ export class DagScheduler {
 
     return new Promise((resolve, reject) => {
       let activeCount = 0;
+      let stopScheduling = false;
 
       const scheduleNext = () => {
+        if (stopScheduling) {
+          if (activeCount === 0) {
+            resolve();
+          }
+          return;
+        }
+
         let launchedAny = false;
 
         for (const task of sorted) {
-          if (canRun(task) && activeCount < this.maxWorkers) {
+          if (canRun(task) && activeCount < this.maxWorkers && !stopScheduling) {
             launchedAny = true;
             this.acquireFiles(task.target_files);
             running.add(task.id);
@@ -207,6 +215,10 @@ export class DagScheduler {
                 if (outcome === "completed") {
                   task.status = "completed";
                   completed.add(task.id);
+                } else if (outcome === "aborted") {
+                  task.status = "pending";
+                  stopScheduling = true;
+                  logger.info({ taskId: task.id }, "Task execution aborted externally. Preserved as pending for next wave.");
                 } else if (outcome === "skipped") {
                   task.status = "skipped";
                   failed.add(task.id);
@@ -236,10 +248,12 @@ export class DagScheduler {
         if (pendingCount === 0 && activeCount === 0) {
           resolve();
         } else if (!launchedAny && activeCount === 0 && pendingCount > 0) {
-          logger.warn("Scheduler reached state with no runnable tasks but pending tasks remain");
-          for (const t of sorted.filter((task) => task.status === "pending")) {
-            t.status = "skipped";
-            t.failure_reason = "Unmet dependency or lock starvation";
+          if (!stopScheduling) {
+            logger.warn("Scheduler reached state with no runnable tasks but pending tasks remain");
+            for (const t of sorted.filter((task) => task.status === "pending")) {
+              t.status = "skipped";
+              t.failure_reason = "Unmet dependency or lock starvation";
+            }
           }
           resolve();
         }

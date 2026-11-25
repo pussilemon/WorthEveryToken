@@ -16,6 +16,8 @@ export interface AgentExecutionOptions {
   maxBudgetUsd?: number;
   model?: string;
   allowedTools?: string;
+  phase?: "audit" | "execute" | "repair";
+  taskId?: string;
   onChunk?: (chunk: string) => void;
 }
 
@@ -186,22 +188,22 @@ export function parseUsageText(text: string): {
   let window5hResetAt: Date | null = null;
   const buckets: QuotaBucket[] = [];
 
-  // Percentage patterns: e.g. "Weekly limit: 73% used" or "weekly: 73%"
-  const weeklyPctMatch = text.match(/weekly(?:\s+limit)?[:\s]+(\d+(?:\.\d+)?)\s*%/i);
+  // Percentage patterns: e.g. "Weekly limit: 73% used" or "Weekly Limit:\n  Usage: 68%"
+  const weeklyPctMatch = text.match(/weekly(?:[^\n%]*?[:\s])?(?:[\r\n\s]*(?:usage[:\s]+)?)(\d+(?:\.\d+)?)\s*%/i);
   if (weeklyPctMatch?.[1]) {
     weeklyUsedPct = parseFloat(weeklyPctMatch[1]);
   }
 
   // Daily pattern: e.g. "Daily limit: 60% used"
-  const dailyPctMatch = text.match(/(?:daily|24-hour|24h)(?:\s+limit)?[:\s]+(\d+(?:\.\d+)?)\s*%/i);
+  const dailyPctMatch = text.match(/(?:daily|24-hour|24h)(?:[^\n%]*?[:\s])?(?:[\r\n\s]*(?:usage[:\s]+)?)(\d+(?:\.\d+)?)\s*%/i);
   let dailyUsedPct: number | null = null;
   if (dailyPctMatch?.[1]) {
     dailyUsedPct = parseFloat(dailyPctMatch[1]);
   }
 
-  // Rolling window: e.g. "5-hour limit: 45%", "3h limit: 20%", "6-hour: 30%"
+  // Rolling window: e.g. "5-hour limit: 45%", "5-hour Window:\n  Usage: 42%", "3h limit: 20%"
   let windowHours = 5;
-  const customWindowMatch = text.match(/(\d+)(?:-hour|h)(?:\s+limit)?[:\s]+(\d+(?:\.\d+)?)\s*%/i);
+  const customWindowMatch = text.match(/(\d+)(?:-hour|h)(?:[^\n%]*?[:\s])?(?:[\r\n\s]*(?:usage[:\s]+)?)(\d+(?:\.\d+)?)\s*%/i);
   if (customWindowMatch?.[1] && customWindowMatch[2]) {
     const hoursParsed = parseInt(customWindowMatch[1], 10);
     if (hoursParsed > 0 && hoursParsed < 24) {
@@ -211,13 +213,13 @@ export function parseUsageText(text: string): {
   }
 
   if (window5hUsedPct === null) {
-    const sessionPctMatch = text.match(/(?:5-hour|5h|session)(?:\s+limit)?[:\s]+(\d+(?:\.\d+)?)\s*%/i);
+    const sessionPctMatch = text.match(/(?:5-hour|5h|session)(?:[^\n%]*?[:\s])?(?:[\r\n\s]*(?:usage[:\s]+)?)(\d+(?:\.\d+)?)\s*%/i);
     if (sessionPctMatch?.[1]) {
       window5hUsedPct = parseFloat(sessionPctMatch[1]);
     }
   }
 
-  // Relative resets: e.g. "Resets in 2h 15m" or "resets in 45m"
+  // Relative resets: e.g. "Resets in 2h 15m" or "resets in 45m" or "Resets in 2 hours"
   const relResetMatch = text.match(/resets\s+in\s+(?:(\d+)\s*h(?:ours?)?)?\s*(?:(\d+)\s*m(?:in(?:utes?)?)?)?/i);
   if (relResetMatch) {
     const hours = parseInt(relResetMatch[1] ?? "0", 10);
@@ -228,8 +230,8 @@ export function parseUsageText(text: string): {
     }
   }
 
-  // Day reset patterns: e.g. "Resets Mon 8:00 AM" or "Resets Monday 08:00"
-  const dayResetMatch = text.match(/resets\s+(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)\s+(\d{1,2}):(\d{2})(?:\s*(am|pm))?/i);
+  // Day reset patterns: e.g. "Resets Mon 8:00 AM" or "Resets Monday 08:00" or "Resets next Monday at 08:00"
+  const dayResetMatch = text.match(/resets\s+(?:next\s+)?(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)\s+(?:at\s+)?(\d{1,2}):(\d{2})(?:\s*(am|pm))?/i);
   if (dayResetMatch) {
     const dayStr = dayResetMatch[1]?.slice(0, 3).toLowerCase();
     let hour = parseInt(dayResetMatch[2] ?? "0", 10);
