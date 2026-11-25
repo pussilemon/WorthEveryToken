@@ -20,6 +20,53 @@ export interface AgyAdapterConfig {
   silenceWatchdogSec?: number;
 }
 
+export function normalizeAgyOutput(rawOutput: string): string {
+  // Strip ANSI/CSI and OSC escape sequences
+  const ansiRegex = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+  const oscRegex = /\u001b\][^\u0007]*\u0007/g;
+  let clean = rawOutput.replace(ansiRegex, "").replace(oscRegex, "");
+
+  // Normalize line endings
+  clean = clean.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+
+  // Check if there is an outer JSON wrapper
+  const tryUnwrapJson = (str: string): string | null => {
+    try {
+      const parsed = JSON.parse(str);
+      if (parsed && typeof parsed === "object") {
+        if (typeof parsed.response === "string") return parsed.response;
+        if (typeof parsed.result === "string") return parsed.result;
+        if (typeof parsed.text === "string") return parsed.text;
+        if (typeof parsed.content === "string") return parsed.content;
+        if (typeof parsed.output === "string") return parsed.output;
+        if (parsed.message && typeof parsed.message.content === "string") return parsed.message.content;
+      }
+    } catch {
+      // Not direct JSON
+    }
+    return null;
+  };
+
+  const directUnwrap = tryUnwrapJson(clean);
+  if (directUnwrap) {
+    return directUnwrap;
+  }
+
+  // Look for JSON object in last line or block
+  const lines = clean.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const candidate = lines.slice(i).join("\n").trim();
+    if (candidate.startsWith("{") && candidate.endsWith("}")) {
+      const unwrapped = tryUnwrapJson(candidate);
+      if (unwrapped) {
+        return unwrapped;
+      }
+    }
+  }
+
+  return clean;
+}
+
 export class AgyAdapter implements AgentAdapter {
   public readonly name = "agy" as const;
   private readonly binary: string;
@@ -54,7 +101,7 @@ export class AgyAdapter implements AgentAdapter {
     const wallClockSec = options.timeoutSec ?? this.wallClockTimeoutSec;
     const silenceSec = this.silenceWatchdogSec;
 
-    let fullOutput = "";
+    let rawFullOutput = "";
     let killedByWatchdog = false;
     let killedByWallClock = false;
 
@@ -104,7 +151,7 @@ export class AgyAdapter implements AgentAdapter {
           resetSilenceWatchdog();
 
           ptyProcess.onData((data: string) => {
-            fullOutput += data;
+            rawFullOutput += data;
             options.onChunk?.(data);
             resetSilenceWatchdog();
           });
@@ -112,13 +159,14 @@ export class AgyAdapter implements AgentAdapter {
           ptyProcess.onExit(({ exitCode }) => {
             cleanupTimers();
             const durationMs = Date.now() - startTime;
+            const normalized = normalizeAgyOutput(rawFullOutput);
 
             if (killedByWatchdog) {
               return resolve({
                 exitCode: 124,
                 status: "FAILED",
                 digest: null,
-                output: fullOutput,
+                output: normalized,
                 error: `Agy process terminated by silence watchdog after ${silenceSec}s with no output`,
                 metrics: { durationMs }
               });
@@ -129,21 +177,21 @@ export class AgyAdapter implements AgentAdapter {
                 exitCode: 124,
                 status: "FAILED",
                 digest: null,
-                output: fullOutput,
+                output: normalized,
                 error: `Agy process exceeded wall-clock timeout of ${wallClockSec}s`,
                 metrics: { durationMs }
               });
             }
 
-            const signal = parseExitSignal(fullOutput);
-            const digest = parseDigest(fullOutput);
+            const signal = parseExitSignal(normalized);
+            const digest = parseDigest(normalized);
 
             if (signal.status === "BLOCKED") {
               return resolve({
                 exitCode: 0,
                 status: "BLOCKED",
                 digest,
-                output: fullOutput,
+                output: normalized,
                 blockedReason: signal.reason,
                 metrics: { durationMs }
               });
@@ -154,7 +202,7 @@ export class AgyAdapter implements AgentAdapter {
                 exitCode: 0,
                 status: "DONE",
                 digest,
-                output: fullOutput,
+                output: normalized,
                 metrics: { durationMs }
               });
             }
@@ -163,19 +211,20 @@ export class AgyAdapter implements AgentAdapter {
               exitCode: exitCode ?? 1,
               status: "FAILED",
               digest,
-              output: fullOutput,
-              error: digest === null ? "Missing or invalid <WQB_DIGEST> block" : "Non-zero exit code or missing exit signal",
+              output: normalized,
+              error: digest === null ? "Missing or invalid <WET_DIGEST> block" : "Non-zero exit code or missing exit signal",
               metrics: { durationMs }
             });
           });
         } catch (err: any) {
           cleanupTimers();
           const durationMs = Date.now() - startTime;
+          const normalized = normalizeAgyOutput(rawFullOutput);
           resolve({
             exitCode: 1,
             status: "FAILED",
             digest: null,
-            output: fullOutput,
+            output: normalized,
             error: err?.message || String(err),
             metrics: { durationMs }
           });
@@ -193,21 +242,22 @@ export class AgyAdapter implements AgentAdapter {
 
       subprocess.stdout?.on("data", (chunk: Buffer) => {
         const str = chunk.toString();
-        fullOutput += str;
+        rawFullOutput += str;
         options.onChunk?.(str);
       });
 
       const result = await subprocess;
       const durationMs = Date.now() - startTime;
-      const signal = parseExitSignal(fullOutput);
-      const digest = parseDigest(fullOutput);
+      const normalized = normalizeAgyOutput(rawFullOutput);
+      const signal = parseExitSignal(normalized);
+      const digest = parseDigest(normalized);
 
       if (signal.status === "BLOCKED") {
         return {
           exitCode: 0,
           status: "BLOCKED",
           digest,
-          output: fullOutput,
+          output: normalized,
           blockedReason: signal.reason,
           metrics: { durationMs }
         };
@@ -218,7 +268,7 @@ export class AgyAdapter implements AgentAdapter {
           exitCode: 0,
           status: "DONE",
           digest,
-          output: fullOutput,
+          output: normalized,
           metrics: { durationMs }
         };
       }
@@ -227,17 +277,18 @@ export class AgyAdapter implements AgentAdapter {
         exitCode: result.exitCode ?? 1,
         status: "FAILED",
         digest,
-        output: fullOutput,
-        error: "Failed exit check or missing digest block",
+        output: normalized,
+        error: digest === null ? "Missing or invalid <WET_DIGEST> block" : "Failed exit check",
         metrics: { durationMs }
       };
     } catch (err: any) {
       const durationMs = Date.now() - startTime;
+      const normalized = normalizeAgyOutput(rawFullOutput);
       return {
         exitCode: err?.exitCode ?? 1,
         status: "FAILED",
-        digest: parseDigest(fullOutput),
-        output: fullOutput,
+        digest: parseDigest(normalized),
+        output: normalized,
         error: err?.message || String(err),
         metrics: { durationMs }
       };

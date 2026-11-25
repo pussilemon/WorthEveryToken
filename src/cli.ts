@@ -14,17 +14,17 @@ import { logger } from "./utils/logger.js";
 const program = new Command();
 
 program
-  .name("wqb")
-  .description("Weekend Quota Burner & Autonomous Codebase Auditor")
+  .name("wet")
+  .description("WorthEveryToken — Autonomous Headless Codebase Auditor & Quota Optimizer")
   .version("0.1.0");
 
-// 1. wqb init
+// 1. wet init
 program
   .command("init")
-  .description("Initialize wqb configuration and auto-detect project quality gates")
+  .description("Initialize WorthEveryToken configuration and auto-detect project quality gates")
   .action(() => {
     const root = process.cwd();
-    const configPath = path.join(root, "wqb.config.yaml");
+    const configPath = path.join(root, "wet.config.yaml");
 
     const gates = autoDetectQualityGates(root);
     logger.info({ gates }, "Auto-detected quality gates");
@@ -34,7 +34,7 @@ program
         root: ".",
         base_branch: "main",
         audit_branch_prefix: "ai-weekend-audit",
-        worktree_dir: ".wqb/worktrees",
+        worktree_dir: ".wet/worktrees",
         max_parallel_workers: 2
       },
       limits: {
@@ -73,23 +73,23 @@ program
     };
 
     fs.writeFileSync(configPath, yaml.stringify(sampleConfig), "utf-8");
-    logger.info({ configPath }, "Generated wqb.config.yaml");
+    logger.info({ configPath }, "Generated wet.config.yaml");
 
-    // Ensure .wqb/ is in .gitignore
+    // Ensure .wet/ is in .gitignore
     const gitignorePath = path.join(root, ".gitignore");
     let gitignore = "";
     if (fs.existsSync(gitignorePath)) {
       gitignore = fs.readFileSync(gitignorePath, "utf-8");
     }
-    if (!gitignore.includes(".wqb")) {
-      fs.appendFileSync(gitignorePath, "\n.wqb/\n", "utf-8");
-      logger.info("Added .wqb/ to .gitignore");
+    if (!gitignore.includes(".wet")) {
+      fs.appendFileSync(gitignorePath, "\n.wet/\n", "utf-8");
+      logger.info("Added .wet/ to .gitignore");
     }
 
-    console.log("✓ Successfully initialized wqb configuration.");
+    console.log("✓ Successfully initialized WorthEveryToken (wet) configuration.");
   });
 
-// 2. wqb audit
+// 2. wet audit
 program
   .command("audit")
   .description("Run Phase 1 read-only codebase audit and generate backlog")
@@ -116,14 +116,14 @@ program
     }
   });
 
-// 3. wqb run
+// 3. wet run
 program
   .command("run")
   .description("Execute autonomous audit and fix pipeline")
   .option("--dry-run", "Verify plan without executing tasks in worktrees")
   .option("--workers <number>", "Number of parallel workers", parseInt)
   .option("--max-budget <usd>", "Max budget in USD", parseFloat)
-  .option("--resume", "Resume existing session from .wqb/tasks.json")
+  .option("--resume", "Resume existing session from .wet/tasks.json")
   .action(async (opts) => {
     try {
       const config = loadConfig();
@@ -143,18 +143,18 @@ program
     }
   });
 
-// 4. wqb status
+// 4. wet status
 program
   .command("status")
   .description("Show backlog status, telemetry burn-rate, and circuit breaker")
   .action(() => {
     const config = loadConfig();
-    const tasksPath = path.join(".wqb", "tasks.json");
+    const tasksPath = path.join(".wet", "tasks.json");
     const backlog = loadBacklog(tasksPath);
 
-    console.log("\n=== WQB Status ===");
+    console.log("\n=== WorthEveryToken (wet) Status ===");
     if (!backlog) {
-      console.log("No active backlog found at .wqb/tasks.json. Run 'wqb audit' or 'wqb run' first.");
+      console.log("No active backlog found at .wet/tasks.json. Run 'wet audit' or 'wet run' first.");
     } else {
       const summary = {
         total: backlog.tasks.length,
@@ -180,15 +180,15 @@ program
     console.log(`- 7-Day Window Cost: $${usage.cost7dUsd.toFixed(2)} USD (${usage.tokens7d} tokens)`);
   });
 
-// 5. wqb report
+// 5. wet report
 program
   .command("report")
   .description("Generate and output final markdown report")
   .action(() => {
-    const tasksPath = path.join(".wqb", "tasks.json");
+    const tasksPath = path.join(".wet", "tasks.json");
     const backlog = loadBacklog(tasksPath);
     if (!backlog) {
-      console.error("No backlog found at .wqb/tasks.json");
+      console.error("No backlog found at .wet/tasks.json");
       process.exit(1);
     }
 
@@ -204,7 +204,7 @@ program
     console.log("\n" + content);
   });
 
-// 6. wqb cleanup
+// 6. wet cleanup
 program
   .command("cleanup")
   .description("Clean up orphan worktrees and temporary branches")

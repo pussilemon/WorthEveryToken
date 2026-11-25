@@ -8,7 +8,7 @@ export interface LoggerOptions {
 }
 
 export function initLogger(options: LoggerOptions = {}) {
-  const logDir = options.logDir ?? ".wqb/logs";
+  const logDir = options.logDir ?? ".wet/logs";
   const verbose = options.verbose ?? false;
 
   try {
@@ -17,7 +17,7 @@ export function initLogger(options: LoggerOptions = {}) {
     // Ignore error if directory already exists
   }
 
-  const logFilePath = path.join(logDir, "wqb.log");
+  const logFilePath = path.join(logDir, "wet.log");
 
   return pino({
     level: verbose ? "debug" : "info",

@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { AgyAdapter } from "../src/adapters/agy-adapter.js";
+import { AgyAdapter, normalizeAgyOutput } from "../src/adapters/agy-adapter.js";
+import { parseExitSignal, parseDigest } from "../src/adapters/agent-adapter.js";
 
 describe("AgyAdapter", () => {
   let tmpDir: string;
@@ -10,7 +11,7 @@ describe("AgyAdapter", () => {
   let workingScriptPath: string;
 
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wqb-agy-test-"));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wet-agy-test-"));
 
     // 1. Script that hangs silently without output (simulating issue #318 non-TTY hang)
     hangingScriptPath = path.join(tmpDir, "mock-hanging-agy.sh");
@@ -27,10 +28,10 @@ sleep 10
     fs.writeFileSync(
       workingScriptPath,
       `#!/bin/bash
-echo '<WQB_DIGEST>'
+echo '<WET_DIGEST>'
 echo '{"files_changed": ["src/util.ts"], "summary": "Added tests", "tests_added": 2, "risks": []}'
-echo '</WQB_DIGEST>'
-echo '<WQB_EXIT_SIGNAL status="DONE"/>'
+echo '</WET_DIGEST>'
+echo '<WET_EXIT_SIGNAL status="DONE"/>'
 exit 0
 `,
       { mode: 0o755 }
@@ -49,7 +50,7 @@ exit 0
     const adapter = new AgyAdapter({
       binary: hangingScriptPath,
       usePty: true,
-      silenceWatchdogSec: 1, // 1 second watchdog
+      silenceWatchdogSec: 1,
       wallClockTimeoutSec: 5
     });
 
@@ -77,5 +78,21 @@ exit 0
     expect(result.digest).not.toBeNull();
     expect(result.digest?.files_changed).toEqual(["src/util.ts"]);
     expect(result.digest?.tests_added).toBe(2);
+  });
+
+  it("should strip ANSI sequences and unwrap JSON output correctly", () => {
+    const rawAnsiWrapped = `\u001b[32mStarting...\u001b[0m\r\n{"response": "<WET_DIGEST>\\n{\\"files_changed\\": [\\"src/foo.ts\\"], \\"summary\\": \\"Cleaned types\\", \\"tests_added\\": 0, \\"risks\\": []}\\n</WET_DIGEST>\\n<WET_EXIT_SIGNAL status=\\"DONE\\"/>"}`;
+
+    const normalized = normalizeAgyOutput(rawAnsiWrapped);
+    expect(normalized).not.toContain("\u001b[32m");
+    expect(normalized).toContain("<WET_DIGEST>");
+    expect(normalized).toContain("<WET_EXIT_SIGNAL status=\"DONE\"/>");
+
+    const signal = parseExitSignal(normalized);
+    expect(signal.status).toBe("DONE");
+
+    const digest = parseDigest(normalized);
+    expect(digest?.files_changed).toEqual(["src/foo.ts"]);
+    expect(digest?.summary).toBe("Cleaned types");
   });
 });

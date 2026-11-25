@@ -18,10 +18,10 @@ You are an Autonomous Senior Engineer executing a single atomic task in an isola
 
 ## Completion Protocol
 When finished and verified, output:
-<WQB_DIGEST>
+<WET_DIGEST>
 {"files_changed": ["path1"], "summary": "max 2 sentences", "tests_added": 1, "risks": []}
-</WQB_DIGEST>
-<WQB_EXIT_SIGNAL status="DONE"/>
+</WET_DIGEST>
+<WET_EXIT_SIGNAL status="DONE"/>
 
 If the task is impossible or based on a false positive in the audit, make NO file edits and output:
-<WQB_EXIT_SIGNAL status="BLOCKED" reason="concise explanation"/>
+<WET_EXIT_SIGNAL status="BLOCKED" reason="concise explanation"/>

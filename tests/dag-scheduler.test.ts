@@ -62,7 +62,7 @@ describe("DagScheduler", () => {
       }
       await new Promise((resolve) => setTimeout(resolve, 50));
       currentConcurrent--;
-      return true;
+      return "completed";
     });
 
     expect(maxConcurrent).toBe(1);
@@ -87,7 +87,7 @@ describe("DagScheduler", () => {
       }
       await new Promise((resolve) => setTimeout(resolve, 60));
       currentConcurrent--;
-      return true;
+      return "completed";
     });
 
     expect(maxConcurrent).toBe(2);
@@ -105,9 +105,9 @@ describe("DagScheduler", () => {
 
     await scheduler.runScheduler(tasks, async (task) => {
       if (task.id === "T-001") {
-        return false; // Fail T-001
+        return "failed";
       }
-      return true;
+      return "completed";
     });
 
     expect(tasks[0]?.status).toBe("failed");
@@ -115,5 +115,38 @@ describe("DagScheduler", () => {
     expect(tasks[1]?.failure_reason).toContain("Dependency T-001 failed");
     expect(tasks[2]?.status).toBe("skipped");
     expect(tasks[2]?.failure_reason).toContain("Dependency T-002 failed");
+  });
+
+  it("should support resume when dependency is already completed", async () => {
+    const scheduler = new DagScheduler({ maxParallelWorkers: 2 });
+    const tasks: Task[] = [
+      createMockTask({ id: "T-001", status: "completed", target_files: ["src/a.ts"] }),
+      createMockTask({ id: "T-002", depends_on: ["T-001"], target_files: ["src/b.ts"] })
+    ];
+
+    let t2Executed = false;
+    await scheduler.runScheduler(tasks, async (task) => {
+      if (task.id === "T-002") {
+        t2Executed = true;
+        return "completed";
+      }
+      return "completed";
+    });
+
+    expect(t2Executed).toBe(true);
+    expect(tasks[1]?.status).toBe("completed");
+  });
+
+  it("should preserve skipped status and not overwrite to failed", async () => {
+    const scheduler = new DagScheduler({ maxParallelWorkers: 2 });
+    const tasks: Task[] = [
+      createMockTask({ id: "T-001", target_files: ["src/a.ts"] })
+    ];
+
+    await scheduler.runScheduler(tasks, async () => {
+      return "skipped";
+    });
+
+    expect(tasks[0]?.status).toBe("skipped");
   });
 });

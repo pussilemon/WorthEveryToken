@@ -10,7 +10,7 @@ describe("GitManager Integration", () => {
   let tmpDir: string;
 
   beforeEach(async () => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wqb-git-test-"));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wet-git-test-"));
     await execa("git", ["init", "-b", "main"], { cwd: tmpDir });
     await execa("git", ["config", "user.name", "Test User"], { cwd: tmpDir });
     await execa("git", ["config", "user.email", "test@example.com"], { cwd: tmpDir });
@@ -32,7 +32,7 @@ describe("GitManager Integration", () => {
     const gitManager = new GitManager({
       repoRoot: tmpDir,
       baseBranch: "main",
-      worktreeDir: ".wqb/worktrees"
+      worktreeDir: ".wet/worktrees"
     });
 
     await gitManager.checkPreflight();
@@ -73,7 +73,7 @@ describe("GitManager Integration", () => {
     expect(fs.existsSync(worktreePath)).toBe(false);
 
     // Verify temporary branch is removed
-    const { stdout: branches } = await execa("git", ["branch", "--list", "wqb-task-T-001"], { cwd: tmpDir });
+    const { stdout: branches } = await execa("git", ["branch", "--list", "wet-task-T-001"], { cwd: tmpDir });
     expect(branches.trim()).toBe("");
 
     // Verify audit branch HEAD is identical to initial HEAD (not polluted)
@@ -126,5 +126,66 @@ describe("GitManager Integration", () => {
 
     await gitManager.removeWorktree(task.id);
     expect(fs.existsSync(worktreePath)).toBe(false);
+  });
+
+  it("should symlink dependency directory without deleting original on worktree removal", async () => {
+    // Create an untracked node_modules in repoRoot
+    const originalNodeModules = path.join(tmpDir, "node_modules");
+    fs.mkdirSync(originalNodeModules, { recursive: true });
+    fs.writeFileSync(path.join(originalNodeModules, "dummy.txt"), "package content", "utf-8");
+
+    const gitManager = new GitManager({
+      repoRoot: tmpDir,
+      baseBranch: "main"
+    });
+
+    await gitManager.initAuditBranch();
+    const worktreePath = await gitManager.createWorktree("T-003");
+
+    const worktreeNodeModules = path.join(worktreePath, "node_modules");
+    expect(fs.existsSync(worktreeNodeModules)).toBe(true);
+    expect(fs.lstatSync(worktreeNodeModules).isSymbolicLink()).toBe(true);
+
+    // Remove worktree
+    await gitManager.removeWorktree("T-003");
+    expect(fs.existsSync(worktreePath)).toBe(false);
+
+    // Verify original node_modules is intact
+    expect(fs.existsSync(originalNodeModules)).toBe(true);
+    expect(fs.existsSync(path.join(originalNodeModules, "dummy.txt"))).toBe(true);
+  });
+
+  it("should throw error when committing a task with no file changes produced", async () => {
+    const gitManager = new GitManager({
+      repoRoot: tmpDir,
+      baseBranch: "main"
+    });
+
+    await gitManager.initAuditBranch();
+    const task: Task = {
+      id: "T-004",
+      title: "No-op task",
+      category: "bug",
+      severity: "low",
+      assigned_agent: "claude",
+      target_files: ["src/good.ts"],
+      depends_on: [],
+      description: "No changes made",
+      acceptance_criteria: ["Done"],
+      estimated_complexity: "small",
+      status: "pending",
+      retries: 0,
+      commit_sha: null,
+      failure_reason: null,
+      digest: null
+    };
+
+    const worktreePath = await gitManager.createWorktree(task.id);
+
+    await expect(gitManager.commitTaskInWorktree(task.id, task, worktreePath)).rejects.toThrow(
+      /No file changes produced by agent/
+    );
+
+    await gitManager.removeWorktree(task.id);
   });
 });

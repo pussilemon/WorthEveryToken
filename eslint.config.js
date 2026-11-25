@@ -20,6 +20,6 @@ export default [
     }
   },
   {
-    ignores: ["dist/**", "vendor/**", "node_modules/**", ".wqb/**"]
+    ignores: ["dist/**", "vendor/**", "node_modules/**", ".wet/**"]
   }
 ];

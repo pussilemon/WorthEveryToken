@@ -23,7 +23,7 @@ export class GitManager {
     this.baseBranch = options.baseBranch ?? "main";
     const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
     this.auditBranch = `${options.auditBranchPrefix ?? "ai-weekend-audit"}-${dateStr}`;
-    this.worktreeDir = path.resolve(this.repoRoot, options.worktreeDir ?? ".wqb/worktrees");
+    this.worktreeDir = path.resolve(this.repoRoot, options.worktreeDir ?? ".wet/worktrees");
   }
 
   private async execGit(args: string[], cwd = this.repoRoot): Promise<{ stdout: string; stderr: string }> {
@@ -35,7 +35,7 @@ export class GitManager {
     const dirtyFiles = stdout
       .split("\n")
       .map((line) => line.trim())
-      .filter((line) => line.length > 0 && !line.includes(".wqb"));
+      .filter((line) => line.length > 0 && !line.includes(".wet"));
 
     if (dirtyFiles.length > 0) {
       throw new Error(
@@ -63,7 +63,7 @@ export class GitManager {
 
   public async createWorktree(taskId: string): Promise<string> {
     const taskWorktreePath = path.join(this.worktreeDir, taskId);
-    const taskBranch = `wqb-task-${taskId}`;
+    const taskBranch = `wet-task-${taskId}`;
 
     fs.mkdirSync(this.worktreeDir, { recursive: true });
 
@@ -85,11 +85,65 @@ export class GitManager {
       this.auditBranch
     ]);
 
+    // Symlink dependency directories from repoRoot if they exist
+    this.linkDependencyDirectories(taskWorktreePath);
+
     return taskWorktreePath;
   }
 
+  private linkDependencyDirectories(worktreePath: string): void {
+    const depDirs = ["node_modules", ".venv", "venv"];
+    for (const dep of depDirs) {
+      const srcPath = path.join(this.repoRoot, dep);
+      const destPath = path.join(worktreePath, dep);
+
+      if (fs.existsSync(srcPath) && !fs.existsSync(destPath)) {
+        try {
+          fs.symlinkSync(srcPath, destPath, "dir");
+          logger.debug({ dep, worktreePath }, "Symlinked dependency directory into worktree");
+        } catch (err) {
+          logger.warn({ dep, err }, "Failed to symlink dependency directory");
+        }
+      }
+    }
+  }
+
+  private unlinkDependencyDirectories(worktreePath: string): void {
+    const depDirs = ["node_modules", ".venv", "venv"];
+    for (const dep of depDirs) {
+      const destPath = path.join(worktreePath, dep);
+      try {
+        if (fs.existsSync(destPath)) {
+          const stat = fs.lstatSync(destPath);
+          if (stat.isSymbolicLink()) {
+            fs.unlinkSync(destPath);
+          }
+        }
+      } catch {
+        // Ignore unlink errors
+      }
+    }
+  }
+
   public async commitTaskInWorktree(taskId: string, task: Task, worktreePath: string): Promise<string> {
-    await this.execGit(["add", "-A", ":!.wqb"], worktreePath);
+    // Check if there are any changes produced
+    const { stdout: status } = await this.execGit(["status", "--porcelain"], worktreePath);
+    const meaningfulChanges = status
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => {
+        if (l.length === 0) return false;
+        if (l.includes(".wet")) return false;
+        // Ignore untracked dependency symlinks
+        if (l.includes("node_modules") || l.includes(".venv") || l.includes("venv")) return false;
+        return true;
+      });
+
+    if (meaningfulChanges.length === 0) {
+      throw new Error("No file changes produced by agent");
+    }
+
+    await this.execGit(["add", "-A", ":!.wet"], worktreePath);
 
     const message = `audit(${task.category}): ${task.title} [${taskId}]`;
     await this.execGit(["commit", "-m", message], worktreePath);
@@ -104,7 +158,6 @@ export class GitManager {
     worktreePath: string,
     onConflictRetry?: () => Promise<boolean>
   ): Promise<boolean> {
-    // Synchronize integration using mutex to avoid git lock races
     const release = await this.acquireMutex();
 
     try {
@@ -137,7 +190,6 @@ export class GitManager {
           }
         }
 
-        // Get new commit SHA after rebase and retry cherry-pick
         const { stdout: newSha } = await this.execGit(["rev-parse", "HEAD"], worktreePath);
         await this.execGit(["checkout", this.auditBranch]);
         await this.execGit(["cherry-pick", newSha.trim()]);
@@ -150,7 +202,10 @@ export class GitManager {
 
   public async removeWorktree(taskId: string): Promise<void> {
     const taskWorktreePath = path.join(this.worktreeDir, taskId);
-    const taskBranch = `wqb-task-${taskId}`;
+    const taskBranch = `wet-task-${taskId}`;
+
+    // Safely remove any dependency symlinks first
+    this.unlinkDependencyDirectories(taskWorktreePath);
 
     try {
       await this.execGit(["worktree", "remove", "--force", taskWorktreePath]);
@@ -160,6 +215,8 @@ export class GitManager {
 
     if (fs.existsSync(taskWorktreePath)) {
       try {
+        // Double check no symlinks inside before rmSync
+        this.unlinkDependencyDirectories(taskWorktreePath);
         fs.rmSync(taskWorktreePath, { recursive: true, force: true });
       } catch {
         // Ignore fs removal errors
@@ -180,13 +237,14 @@ export class GitManager {
   }
 
   public async cleanupAll(): Promise<void> {
-    logger.info("Cleaning up all wqb worktrees and temporary branches...");
+    logger.info("Cleaning up all wet worktrees and temporary branches...");
     try {
       const { stdout } = await this.execGit(["worktree", "list", "--porcelain"]);
       const lines = stdout.split("\n");
       for (const line of lines) {
-        if (line.startsWith("worktree ") && line.includes(".wqb/worktrees")) {
+        if (line.startsWith("worktree ") && line.includes(".wet/worktrees")) {
           const wtPath = line.replace("worktree ", "").trim();
+          this.unlinkDependencyDirectories(wtPath);
           try {
             await this.execGit(["worktree", "remove", "--force", wtPath]);
           } catch {
@@ -200,7 +258,7 @@ export class GitManager {
     }
 
     try {
-      const { stdout: branches } = await this.execGit(["branch", "--list", "wqb-task-*"]);
+      const { stdout: branches } = await this.execGit(["branch", "--list", "wet-task-*"]);
       for (const b of branches.split("\n")) {
         const branchName = b.replace("*", "").trim();
         if (branchName) {

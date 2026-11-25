@@ -4,7 +4,8 @@ import {
   type AgentExecutionOptions,
   type ExecutionResult,
   parseExitSignal,
-  parseDigest
+  parseDigest,
+  extractTextFromClaudeStream
 } from "./agent-adapter.js";
 import { logger } from "../utils/logger.js";
 
@@ -94,6 +95,7 @@ export class ClaudeAdapter implements AgentAdapter {
 
       const result = await subprocess;
       const durationMs = Date.now() - startTime;
+      const extracted = extractTextFromClaudeStream(fullOutput);
 
       if (rateLimited) {
         logger.warn({ rateLimitReset }, "Claude Code hit rate limit");
@@ -101,25 +103,25 @@ export class ClaudeAdapter implements AgentAdapter {
           exitCode: 429,
           status: "RATE_LIMITED",
           digest: null,
-          output: fullOutput,
+          output: extracted.text,
           error: fullStderr,
           rateLimitReset,
-          metrics: { durationMs }
+          metrics: { durationMs, estimatedCostUsd: extracted.costUsd }
         };
       }
 
-      // Dual-Condition Exit Gate
-      const signal = parseExitSignal(fullOutput);
-      const digest = parseDigest(fullOutput);
+      // Dual-Condition Exit Gate on extracted text
+      const signal = parseExitSignal(extracted.text);
+      const digest = parseDigest(extracted.text);
 
       if (signal.status === "BLOCKED") {
         return {
           exitCode: 0,
           status: "BLOCKED",
           digest,
-          output: fullOutput,
+          output: extracted.text,
           blockedReason: signal.reason,
-          metrics: { durationMs }
+          metrics: { durationMs, estimatedCostUsd: extracted.costUsd }
         };
       }
 
@@ -128,8 +130,8 @@ export class ClaudeAdapter implements AgentAdapter {
           exitCode: 0,
           status: "DONE",
           digest,
-          output: fullOutput,
-          metrics: { durationMs }
+          output: extracted.text,
+          metrics: { durationMs, estimatedCostUsd: extracted.costUsd }
         };
       }
 
@@ -138,33 +140,34 @@ export class ClaudeAdapter implements AgentAdapter {
         exitCode: result.exitCode ?? 1,
         status: "FAILED",
         digest,
-        output: fullOutput,
-        error: signal.status === null ? "Missing <WQB_EXIT_SIGNAL status=\"DONE\"/> marker" : fullStderr,
-        metrics: { durationMs }
+        output: extracted.text,
+        error: signal.status === null ? "Missing <WET_EXIT_SIGNAL status=\"DONE\"/> marker" : fullStderr,
+        metrics: { durationMs, estimatedCostUsd: extracted.costUsd }
       };
     } catch (err: any) {
       const durationMs = Date.now() - startTime;
       checkForRateLimit(fullStderr + (err?.message ?? ""));
+      const extracted = extractTextFromClaudeStream(fullOutput);
 
       if (rateLimited) {
         return {
           exitCode: 429,
           status: "RATE_LIMITED",
           digest: null,
-          output: fullOutput,
+          output: extracted.text,
           error: fullStderr,
           rateLimitReset,
-          metrics: { durationMs }
+          metrics: { durationMs, estimatedCostUsd: extracted.costUsd }
         };
       }
 
       return {
         exitCode: err?.exitCode ?? 1,
         status: "FAILED",
-        digest: parseDigest(fullOutput),
-        output: fullOutput,
+        digest: parseDigest(extracted.text),
+        output: extracted.text,
         error: err?.message || String(err),
-        metrics: { durationMs }
+        metrics: { durationMs, estimatedCostUsd: extracted.costUsd }
       };
     }
   }

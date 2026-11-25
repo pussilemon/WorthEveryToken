@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import { type WqbConfig, type Backlog, type Task } from "../config/schema.js";
+import { type WetConfig, type Backlog, type Task } from "../config/schema.js";
 import { GitManager } from "../git/git-manager.js";
-import { DagScheduler } from "./dag-scheduler.js";
+import { DagScheduler, type TaskExecutionOutcome } from "./dag-scheduler.js";
 import { ClaudeAdapter } from "../adapters/claude-adapter.js";
 import { AgyAdapter } from "../adapters/agy-adapter.js";
 import { QualityGatesRunner } from "./quality-gates.js";
@@ -11,7 +11,7 @@ import { QuotaGuard } from "../telemetry/quota-guard.js";
 import { BurnProfiler } from "../telemetry/burn-profiler.js";
 import { Reporter } from "../telemetry/reporter.js";
 import { compilePrompt, loadBacklog, saveBacklog } from "../config/loader.js";
-import { parseBacklogJson } from "../adapters/agent-adapter.js";
+import { parseBacklogJson, parseFixPlanMd } from "../adapters/agent-adapter.js";
 import { logger } from "../utils/logger.js";
 import { execa } from "execa";
 
@@ -23,7 +23,7 @@ export interface OrchestratorRunOptions {
 }
 
 export class Orchestrator {
-  private readonly config: WqbConfig;
+  private readonly config: WetConfig;
   private readonly gitManager: GitManager;
   private readonly claudeAdapter: ClaudeAdapter;
   private readonly agyAdapter: AgyAdapter;
@@ -34,7 +34,7 @@ export class Orchestrator {
   private stopRequested = false;
   private stopReason = "Backlog completed";
 
-  constructor(config: WqbConfig) {
+  constructor(config: WetConfig) {
     this.config = config;
     this.gitManager = new GitManager({
       repoRoot: config.project.root,
@@ -96,12 +96,27 @@ export class Orchestrator {
 
     const parsedBacklog = parseBacklogJson(result.output);
     if (!parsedBacklog) {
-      throw new Error("Phase 1 Audit did not return valid JSON in <WQB_BACKLOG_JSON> tags");
+      throw new Error("Phase 1 Audit did not return valid JSON in <WET_BACKLOG_JSON> tags");
     }
 
-    const tasksPath = path.join(".wqb", "tasks.json");
+    // Save tasks.json
+    const tasksPath = path.join(".wet", "tasks.json");
     saveBacklog(tasksPath, parsedBacklog);
-    logger.info({ taskCount: parsedBacklog.tasks.length }, "Audit backlog saved to .wqb/tasks.json");
+    logger.info({ taskCount: parsedBacklog.tasks.length }, "Audit backlog saved to .wet/tasks.json");
+
+    // Save fix_plan.md
+    const fixPlanDir = path.join(".wet");
+    fs.mkdirSync(fixPlanDir, { recursive: true });
+    const fixPlanMd = parseFixPlanMd(result.output);
+    const planContent =
+      fixPlanMd ??
+      `# WorthEveryToken Fix Plan\n\nGenerated: ${parsedBacklog.generated_at}\n\n` +
+        parsedBacklog.tasks
+          .map((t) => `### [${t.id}] ${t.title} (${t.severity} - ${t.assigned_agent})\n${t.description}\n`)
+          .join("\n");
+
+    fs.writeFileSync(path.join(".wet", "fix_plan.md"), planContent, "utf-8");
+    logger.info("Human-readable plan saved to .wet/fix_plan.md");
 
     return parsedBacklog;
   }
@@ -111,16 +126,27 @@ export class Orchestrator {
     await this.gitManager.checkPreflight();
 
     const auditBranch = await this.gitManager.initAuditBranch(options.resume);
-    const tasksPath = path.join(".wqb", "tasks.json");
+    const tasksPath = path.join(".wet", "tasks.json");
 
     let backlog: Backlog | null = null;
     if (fs.existsSync(tasksPath)) {
       backlog = loadBacklog(tasksPath);
-      logger.info("Loaded existing backlog from .wqb/tasks.json");
+      logger.info("Loaded existing backlog from .wet/tasks.json");
     }
 
     if (!backlog) {
       backlog = await this.runAudit();
+    }
+
+    // When resuming, reset any tasks left 'in_progress' from a previous crash/kill back to 'pending'
+    if (options.resume) {
+      for (const t of backlog.tasks) {
+        if (t.status === "in_progress") {
+          t.status = "pending";
+          logger.info({ taskId: t.id }, "Reset interrupted task from in_progress to pending");
+        }
+      }
+      saveBacklog(tasksPath, backlog);
     }
 
     if (options.dryRun) {
@@ -137,6 +163,12 @@ export class Orchestrator {
       this.stopRequested = true;
       this.stopReason = `Interrupted by ${sig}`;
       if (backlog) {
+        // Leave any currently running task in pending so it can be resumed
+        for (const t of backlog.tasks) {
+          if (t.status === "in_progress") {
+            t.status = "pending";
+          }
+        }
         saveBacklog(tasksPath, backlog);
         Reporter.saveReport({
           auditBranch,
@@ -152,11 +184,10 @@ export class Orchestrator {
     process.on("SIGINT", () => handleSignal("SIGINT"));
     process.on("SIGTERM", () => handleSignal("SIGTERM"));
 
-    await scheduler.runScheduler(backlog.tasks, async (task: Task) => {
+    await scheduler.runScheduler(backlog.tasks, async (task: Task): Promise<TaskExecutionOutcome> => {
       if (this.stopRequested) {
-        task.status = "skipped";
-        task.failure_reason = "Execution stopped by user or safety trigger";
-        return false;
+        task.status = "pending";
+        return "skipped";
       }
 
       // Check Quota Guard limits
@@ -165,18 +196,16 @@ export class Orchestrator {
         this.stopRequested = true;
         this.stopReason = quotaCheck.reason ?? "Quota limit reached";
         logger.warn({ reason: this.stopReason }, "QuotaGuard safety threshold reached, halting execution");
-        task.status = "skipped";
-        task.failure_reason = this.stopReason;
-        return false;
+        task.status = "pending";
+        return "skipped";
       }
 
       // Check Circuit Breaker
       if (this.circuitBreaker.isOpen()) {
         this.stopRequested = true;
         this.stopReason = `Circuit Breaker OPEN: ${this.circuitBreaker.getTripReason()}`;
-        task.status = "skipped";
-        task.failure_reason = this.stopReason;
-        return false;
+        task.status = "pending";
+        return "skipped";
       }
 
       logger.info({ taskId: task.id, agent: task.assigned_agent }, "Executing task in isolated worktree");
@@ -198,7 +227,7 @@ export class Orchestrator {
           });
 
           const result = await this.agyAdapter.execute(prompt, { cwd: worktreePath });
-          this.agyAdapter.saveAgyLog(task.id, ".wqb/logs", result.output);
+          this.agyAdapter.saveAgyLog(task.id, ".wet/logs", result.output);
 
           if (result.status === "DONE" && result.digest) {
             task.digest = result.digest;
@@ -237,15 +266,19 @@ export class Orchestrator {
           if (result.status === "RATE_LIMITED") {
             this.stopRequested = true;
             this.stopReason = `Rate limit encountered: ${result.rateLimitReset ?? "wait for reset"}`;
-            task.status = "skipped";
-            task.failure_reason = "Rate limited";
-            return false;
+            task.status = "pending";
+            task.failure_reason = null;
+            await this.gitManager.removeWorktree(task.id);
+            saveBacklog(tasksPath, backlog);
+            return "skipped";
           }
 
           if (result.status === "BLOCKED") {
             task.status = "skipped";
             task.failure_reason = result.blockedReason ?? "Marked BLOCKED by agent";
-            return false;
+            await this.gitManager.removeWorktree(task.id);
+            saveBacklog(tasksPath, backlog);
+            return "skipped";
           }
 
           if (result.status === "DONE") {
@@ -265,7 +298,7 @@ export class Orchestrator {
           this.circuitBreaker.recordFailure(task.id, task.failure_reason ?? undefined);
           await this.gitManager.removeWorktree(task.id);
           saveBacklog(tasksPath, backlog);
-          return false;
+          return "failed";
         }
 
         // Run Quality Gates & Auto-Repair loop
@@ -281,7 +314,7 @@ export class Orchestrator {
           this.circuitBreaker.recordFailure(task.id, task.failure_reason ?? undefined);
           await this.gitManager.removeWorktree(task.id);
           saveBacklog(tasksPath, backlog);
-          return false;
+          return "failed";
         }
 
         // Commit and integrate
@@ -306,14 +339,14 @@ export class Orchestrator {
 
         await this.gitManager.removeWorktree(task.id);
         saveBacklog(tasksPath, backlog);
-        return integrated;
+        return integrated ? "completed" : "failed";
       } catch (err: any) {
         logger.error({ taskId: task.id, err }, "Unexpected error in task execution");
         task.failure_reason = err?.message || String(err);
         this.circuitBreaker.recordFailure(task.id, task.failure_reason ?? undefined);
         await this.gitManager.removeWorktree(task.id);
         saveBacklog(tasksPath, backlog);
-        return false;
+        return "failed";
       }
     });
 

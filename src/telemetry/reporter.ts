@@ -24,7 +24,7 @@ export class Reporter {
     const agyCount = completed.filter((t) => t.metrics?.agent_used === "agy" && !t.metrics?.fallback_triggered).length;
     const fallbackCount = backlog.tasks.filter((t) => t.metrics?.fallback_triggered).length;
 
-    let md = `# WQB Autonomous Audit Execution Report\n\n`;
+    let md = `# WorthEveryToken (wet) Autonomous Audit Execution Report\n\n`;
     md += `## 1. Executive Summary\n\n`;
     md += `- **Audit Branch:** \`${auditBranch}\`\n`;
     md += `- **Total Duration:** ${durationMin} minutes\n`;
@@ -75,7 +75,7 @@ export class Reporter {
     return md;
   }
 
-  public static saveReport(data: ReportData, outputDir = ".wqb"): string {
+  public static saveReport(data: ReportData, outputDir = ".wet"): string {
     const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
     const filename = `REPORT-${dateStr}.md`;
     const fullPath = path.join(outputDir, filename);

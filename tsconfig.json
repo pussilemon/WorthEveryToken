@@ -12,5 +12,5 @@
     "declaration": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "vendor", ".wqb"]
+  "exclude": ["node_modules", "dist", "vendor", ".wet"]
 }

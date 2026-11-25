@@ -3,13 +3,16 @@ import path from "node:path";
 import os from "node:os";
 import { logger } from "../utils/logger.js";
 
+export interface QuotaUsageEvent {
+  ts: number;
+  costUsd: number;
+  tokens: number;
+}
+
 export interface QuotaState {
   fileOffsets: Record<string, number>;
   sessionCostUsd: number;
-  tokens5h: number;
-  cost5hUsd: number;
-  tokens7d: number;
-  cost7dUsd: number;
+  events: QuotaUsageEvent[];
   lastUpdated: string;
 }
 
@@ -35,7 +38,7 @@ export class QuotaGuard {
 
   constructor(
     limits: QuotaGuardLimits,
-    stateFilePath = ".wqb/quota-state.json",
+    stateFilePath = ".wet/quota-state.json",
     claudeProjectsDir?: string
   ) {
     this.limits = limits;
@@ -53,10 +56,7 @@ export class QuotaGuard {
         return {
           fileOffsets: parsed.fileOffsets ?? {},
           sessionCostUsd: parsed.sessionCostUsd ?? 0,
-          tokens5h: parsed.tokens5h ?? 0,
-          cost5hUsd: parsed.cost5hUsd ?? 0,
-          tokens7d: parsed.tokens7d ?? 0,
-          cost7dUsd: parsed.cost7dUsd ?? 0,
+          events: Array.isArray(parsed.events) ? parsed.events : [],
           lastUpdated: parsed.lastUpdated ?? new Date().toISOString()
         };
       } catch {
@@ -66,10 +66,7 @@ export class QuotaGuard {
     return {
       fileOffsets: {},
       sessionCostUsd: 0,
-      tokens5h: 0,
-      cost5hUsd: 0,
-      tokens7d: 0,
-      cost7dUsd: 0,
+      events: [],
       lastUpdated: new Date().toISOString()
     };
   }
@@ -84,91 +81,99 @@ export class QuotaGuard {
     }
   }
 
-  public scanLogs(): UsageWindow {
-    const now = Date.now();
-    const fiveHoursAgo = now - 5 * 60 * 60 * 1000;
+  public scanLogs(now = Date.now()): UsageWindow {
     const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
+    const fiveHoursAgo = now - 5 * 60 * 60 * 1000;
 
-    let deltaTokens5h = 0;
-    let deltaCost5hUsd = 0;
-    let deltaTokens7d = 0;
-    let deltaCost7dUsd = 0;
+    if (fs.existsSync(this.claudeProjectsDir)) {
+      const jsonlFiles = this.findJsonlFiles(this.claudeProjectsDir);
 
-    if (!fs.existsSync(this.claudeProjectsDir)) {
-      return {
-        tokens5h: this.state.tokens5h,
-        cost5hUsd: this.state.cost5hUsd,
-        tokens7d: this.state.tokens7d,
-        cost7dUsd: this.state.cost7dUsd,
-        sessionCostUsd: this.state.sessionCostUsd
-      };
-    }
+      for (const file of jsonlFiles) {
+        try {
+          const stat = fs.statSync(file);
+          const lastOffset = this.state.fileOffsets[file] ?? 0;
 
-    const jsonlFiles = this.findJsonlFiles(this.claudeProjectsDir);
-
-    for (const file of jsonlFiles) {
-      try {
-        const stat = fs.statSync(file);
-        const lastOffset = this.state.fileOffsets[file] ?? 0;
-
-        if (stat.size <= lastOffset) {
-          continue;
-        }
-
-        const fd = fs.openSync(file, "r");
-        const bufferSize = stat.size - lastOffset;
-        const buffer = Buffer.alloc(bufferSize);
-        fs.readSync(fd, buffer, 0, bufferSize, lastOffset);
-        fs.closeSync(fd);
-
-        this.state.fileOffsets[file] = stat.size;
-
-        const lines = buffer.toString("utf-8").split("\n");
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-
-          try {
-            const entry = JSON.parse(trimmed);
-            const entryTimestamp = entry.timestamp ? new Date(entry.timestamp).getTime() : now;
-            const inputTokens = entry.usage?.input_tokens ?? entry.input_tokens ?? 0;
-            const outputTokens = entry.usage?.output_tokens ?? entry.output_tokens ?? 0;
-            const totalTokens = inputTokens + outputTokens;
-
-            // Approximate Claude 3.5 Sonnet pricing: $3 / 1M input, $15 / 1M output
-            const estimatedCost = (inputTokens / 1_000_000) * 3 + (outputTokens / 1_000_000) * 15;
-
-            if (entryTimestamp >= sevenDaysAgo) {
-              deltaTokens7d += totalTokens;
-              deltaCost7dUsd += estimatedCost;
-            }
-            if (entryTimestamp >= fiveHoursAgo) {
-              deltaTokens5h += totalTokens;
-              deltaCost5hUsd += estimatedCost;
-            }
-
-            this.state.sessionCostUsd += estimatedCost;
-          } catch {
-            // Skip unparseable lines
+          if (stat.size <= lastOffset) {
+            continue;
           }
+
+          const fd = fs.openSync(file, "r");
+          const bufferSize = stat.size - lastOffset;
+          const buffer = Buffer.alloc(bufferSize);
+          fs.readSync(fd, buffer, 0, bufferSize, lastOffset);
+          fs.closeSync(fd);
+
+          this.state.fileOffsets[file] = stat.size;
+
+          const lines = buffer.toString("utf-8").split("\n");
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+
+            try {
+              const entry = JSON.parse(trimmed);
+              const entryTimestamp = entry.timestamp ? new Date(entry.timestamp).getTime() : stat.mtimeMs || now;
+              const usage = entry.usage ?? entry.message?.usage;
+
+              if (usage) {
+                const inputTokens = usage.input_tokens ?? 0;
+                const outputTokens = usage.output_tokens ?? 0;
+                const cacheCreationTokens = usage.cache_creation_input_tokens ?? 0;
+                const cacheReadTokens = usage.cache_read_input_tokens ?? 0;
+
+                const totalTokens = inputTokens + outputTokens + cacheCreationTokens + cacheReadTokens;
+
+                // Approximate Sonnet pricing
+                const costUsd =
+                  (inputTokens / 1_000_000) * 3.0 +
+                  (outputTokens / 1_000_000) * 15.0 +
+                  (cacheCreationTokens / 1_000_000) * 3.75 +
+                  (cacheReadTokens / 1_000_000) * 0.30;
+
+                this.state.events.push({
+                  ts: entryTimestamp,
+                  costUsd,
+                  tokens: totalTokens
+                });
+
+                this.state.sessionCostUsd += costUsd;
+              }
+            } catch {
+              // Skip unparseable lines
+            }
+          }
+        } catch (err) {
+          logger.debug({ file, err }, "Error reading jsonl log file");
         }
-      } catch (err) {
-        logger.debug({ file, err }, "Error reading jsonl log file");
       }
     }
 
-    this.state.tokens5h += deltaTokens5h;
-    this.state.cost5hUsd += deltaCost5hUsd;
-    this.state.tokens7d += deltaTokens7d;
-    this.state.cost7dUsd += deltaCost7dUsd;
+    // Prune events older than 7 days
+    this.state.events = this.state.events.filter((e) => e.ts >= sevenDaysAgo);
+
+    let tokens5h = 0;
+    let cost5hUsd = 0;
+    let tokens7d = 0;
+    let cost7dUsd = 0;
+
+    for (const event of this.state.events) {
+      tokens7d += event.tokens;
+      cost7dUsd += event.costUsd;
+
+      if (event.ts >= fiveHoursAgo) {
+        tokens5h += event.tokens;
+        cost5hUsd += event.costUsd;
+      }
+    }
+
     this.state.lastUpdated = new Date().toISOString();
     this.saveState();
 
     return {
-      tokens5h: this.state.tokens5h,
-      cost5hUsd: this.state.cost5hUsd,
-      tokens7d: this.state.tokens7d,
-      cost7dUsd: this.state.cost7dUsd,
+      tokens5h,
+      cost5hUsd,
+      tokens7d,
+      cost7dUsd,
       sessionCostUsd: this.state.sessionCostUsd
     };
   }
@@ -176,6 +181,7 @@ export class QuotaGuard {
   public shouldStop(): { stop: boolean; reason?: string } {
     const usage = this.scanLogs();
 
+    // 1. Session cost limit
     if (usage.sessionCostUsd >= this.limits.claudeMaxSessionBudgetUsd) {
       return {
         stop: true,
@@ -183,7 +189,7 @@ export class QuotaGuard {
       };
     }
 
-    // Typical standard limit threshold: estimate 5h cap ~$20 or proportional
+    // 2. 5-hour window safety threshold
     const estimated5hCapUsd = 20.0;
     const pct5h = (usage.cost5hUsd / estimated5hCapUsd) * 100;
     if (pct5h >= this.limits.stopAtFiveHourQuotaPct) {
@@ -193,11 +199,26 @@ export class QuotaGuard {
       };
     }
 
+    // 3. Weekly quota safety threshold
+    const estimatedWeeklyCapUsd = 100.0;
+    const pct7d = (usage.cost7dUsd / estimatedWeeklyCapUsd) * 100;
+    if (pct7d >= this.limits.stopAtWeeklyQuotaPct) {
+      return {
+        stop: true,
+        reason: `Weekly window usage (${pct7d.toFixed(1)}%) reached safety threshold (${this.limits.stopAtWeeklyQuotaPct}%)`
+      };
+    }
+
     return { stop: false };
   }
 
   public addSessionCost(amountUsd: number): void {
     this.state.sessionCostUsd += amountUsd;
+    this.state.events.push({
+      ts: Date.now(),
+      costUsd: amountUsd,
+      tokens: 0
+    });
     this.saveState();
   }
 

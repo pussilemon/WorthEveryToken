@@ -2,7 +2,7 @@ project:
   root: "."
   base_branch: "main"
   audit_branch_prefix: "ai-weekend-audit"
-  worktree_dir: ".wqb/worktrees"
+  worktree_dir: ".wet/worktrees"
   max_parallel_workers: 2            # 1 = sequenziale puro, 2-3 = parallelo su worktree disgiunti
 
 limits:

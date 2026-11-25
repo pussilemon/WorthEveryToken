@@ -61,57 +61,69 @@ export const QualityGateCommandSchema = z.object({
   cmd: z.string()
 });
 
+export const ProjectConfigSchema = z.object({
+  root: z.string().default("."),
+  base_branch: z.string().default("main"),
+  audit_branch_prefix: z.string().default("ai-weekend-audit"),
+  worktree_dir: z.string().default(".wet/worktrees"),
+  max_parallel_workers: z.number().int().min(1).default(2)
+});
+
+export const LimitsConfigSchema = z.object({
+  max_total_tasks: z.number().int().min(1).default(25),
+  max_retries_per_task: z.number().int().min(0).default(3),
+  max_consecutive_failures: z.number().int().min(1).default(3),
+  claude_max_turns_per_task: z.number().int().min(1).default(18),
+  claude_max_budget_usd_per_task: z.number().min(0).default(2.5),
+  claude_max_session_budget_usd: z.number().min(0).default(25.0),
+  stop_at_five_hour_quota_pct: z.number().min(1).max(100).default(90),
+  stop_at_weekly_quota_pct: z.number().min(1).max(100).default(95),
+  agy_wall_clock_timeout_sec: z.number().int().min(10).default(180),
+  agy_silence_watchdog_sec: z.number().int().min(5).default(60)
+});
+
+export const RoutingConfigSchema = z.object({
+  claude_categories: z.array(TaskCategorySchema).default(["bug", "race_condition", "memory_leak", "security", "edge_case"]),
+  agy_categories: z.array(TaskCategorySchema).default(["test_coverage", "tech_debt", "typing_lint"]),
+  agy_fallback_to_claude: z.boolean().default(true)
+});
+
+export const QualityGatesConfigSchema = z.object({
+  auto_detect: z.boolean().default(true),
+  commands: z.array(QualityGateCommandSchema).default([
+    { name: "typecheck", cmd: "npm run typecheck" },
+    { name: "lint", cmd: "npm run lint" },
+    { name: "test", cmd: "npm test" }
+  ]),
+  gate_timeout_sec: z.number().int().min(5).default(120)
+});
+
+export const AgyConfigSchema = z.object({
+  binary: z.string().default("agy"),
+  use_pty: z.boolean().default(true),
+  disable_slow_mcp: z.boolean().default(true),
+  extra_args: z.array(z.string()).default(["--output-format", "json"])
+});
+
+export const ClaudeConfigSchema = z.object({
+  binary: z.string().default("claude"),
+  model: z.string().default("sonnet"),
+  audit_model: z.string().default("opus")
+});
+
 export const ConfigSchema = z.object({
-  project: z.object({
-    root: z.string().default("."),
-    base_branch: z.string().default("main"),
-    audit_branch_prefix: z.string().default("ai-weekend-audit"),
-    worktree_dir: z.string().default(".wqb/worktrees"),
-    max_parallel_workers: z.number().int().min(1).default(2)
-  }),
-  limits: z.object({
-    max_total_tasks: z.number().int().min(1).default(25),
-    max_retries_per_task: z.number().int().min(0).default(3),
-    max_consecutive_failures: z.number().int().min(1).default(3),
-    claude_max_turns_per_task: z.number().int().min(1).default(18),
-    claude_max_budget_usd_per_task: z.number().min(0).default(2.50),
-    claude_max_session_budget_usd: z.number().min(0).default(25.00),
-    stop_at_five_hour_quota_pct: z.number().min(1).max(100).default(90),
-    stop_at_weekly_quota_pct: z.number().min(1).max(100).default(95),
-    agy_wall_clock_timeout_sec: z.number().int().min(10).default(180),
-    agy_silence_watchdog_sec: z.number().int().min(5).default(60)
-  }),
-  routing: z.object({
-    claude_categories: z.array(TaskCategorySchema).default(["bug", "race_condition", "memory_leak", "security", "edge_case"]),
-    agy_categories: z.array(TaskCategorySchema).default(["test_coverage", "tech_debt", "typing_lint"]),
-    agy_fallback_to_claude: z.boolean().default(true)
-  }),
-  quality_gates: z.object({
-    auto_detect: z.boolean().default(true),
-    commands: z.array(QualityGateCommandSchema).default([
-      { name: "typecheck", cmd: "npm run typecheck" },
-      { name: "lint", cmd: "npm run lint" },
-      { name: "test", cmd: "npm test" }
-    ]),
-    gate_timeout_sec: z.number().int().min(5).default(120)
-  }),
-  agy: z.object({
-    binary: z.string().default("agy"),
-    use_pty: z.boolean().default(true),
-    disable_slow_mcp: z.boolean().default(true),
-    extra_args: z.array(z.string()).default(["--output-format", "json"])
-  }),
-  claude: z.object({
-    binary: z.string().default("claude"),
-    model: z.string().default("sonnet"),
-    audit_model: z.string().default("opus")
-  })
+  project: ProjectConfigSchema.default(() => ProjectConfigSchema.parse({})),
+  limits: LimitsConfigSchema.default(() => LimitsConfigSchema.parse({})),
+  routing: RoutingConfigSchema.default(() => RoutingConfigSchema.parse({})),
+  quality_gates: QualityGatesConfigSchema.default(() => QualityGatesConfigSchema.parse({})),
+  agy: AgyConfigSchema.default(() => AgyConfigSchema.parse({})),
+  claude: ClaudeConfigSchema.default(() => ClaudeConfigSchema.parse({}))
 });
 
 export type Task = z.infer<typeof TaskSchema>;
 export type TaskDigest = z.infer<typeof TaskDigestSchema>;
 export type Backlog = z.infer<typeof BacklogSchema>;
-export type WqbConfig = z.infer<typeof ConfigSchema>;
+export type WetConfig = z.infer<typeof ConfigSchema>;
 export type QualityGateCommand = z.infer<typeof QualityGateCommandSchema>;
 export type TaskCategory = z.infer<typeof TaskCategorySchema>;
 export type TaskSeverity = z.infer<typeof TaskSeveritySchema>;

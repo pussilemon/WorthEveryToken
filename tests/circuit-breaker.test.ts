@@ -45,13 +45,13 @@ describe("CircuitBreaker", () => {
 
 describe("Dual-Condition Exit Gate & Signal Parsing", () => {
   it("should recognize DONE signal", () => {
-    const output = "Work completed.\n<WQB_EXIT_SIGNAL status=\"DONE\"/>";
+    const output = "Work completed.\n<WET_EXIT_SIGNAL status=\"DONE\"/>";
     const signal = parseExitSignal(output);
     expect(signal.status).toBe("DONE");
   });
 
   it("should recognize BLOCKED signal with reason", () => {
-    const output = "Cannot fix.\n<WQB_EXIT_SIGNAL status=\"BLOCKED\" reason=\"Legacy external API deprecated\"/>";
+    const output = "Cannot fix.\n<WET_EXIT_SIGNAL status=\"BLOCKED\" reason=\"Legacy external API deprecated\"/>";
     const signal = parseExitSignal(output);
     expect(signal.status).toBe("BLOCKED");
     expect(signal.reason).toBe("Legacy external API deprecated");
@@ -63,17 +63,17 @@ describe("Dual-Condition Exit Gate & Signal Parsing", () => {
     expect(signal.status).toBeNull();
   });
 
-  it("should parse valid WQB_DIGEST block", () => {
+  it("should parse valid WET_DIGEST block", () => {
     const output = `
-<WQB_DIGEST>
+<WET_DIGEST>
 {
   "files_changed": ["src/auth.ts"],
   "summary": "Fixed edge case in token expiration",
   "tests_added": 1,
   "risks": []
 }
-</WQB_DIGEST>
-<WQB_EXIT_SIGNAL status="DONE"/>
+</WET_DIGEST>
+<WET_EXIT_SIGNAL status="DONE"/>
     `;
     const digest = parseDigest(output);
     expect(digest).not.toBeNull();

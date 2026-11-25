@@ -1,10 +1,11 @@
 {
   "name": "worth-every-token",
   "version": "0.1.0",
-  "description": "Weekend Quota Burner & Autonomous Codebase Auditor (wqb)",
+  "description": "WorthEveryToken (wet) — Autonomous Headless Codebase Auditor & Quota Optimizer",
   "type": "module",
   "bin": {
-    "wqb": "./dist/cli.js"
+    "wet": "./dist/cli.js",
+    "wortheverytoken": "./dist/cli.js"
   },
   "scripts": {
     "build": "tsc",

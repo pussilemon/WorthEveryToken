@@ -13,7 +13,7 @@ Rules:
 
 MANDATORY FINAL OUTPUT CONTRACT:
 End your response with ONLY this compact digest block and nothing after it:
-<WQB_DIGEST>
+<WET_DIGEST>
 {"files_changed": ["path1"], "summary": "1 sentence summary", "tests_added": 1, "risks": []}
-</WQB_DIGEST>
-<WQB_EXIT_SIGNAL status="DONE"/>
+</WET_DIGEST>
+<WET_EXIT_SIGNAL status="DONE"/>

@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import yaml from "yaml";
-import { ConfigSchema, type WqbConfig, type Backlog, BacklogSchema, type QualityGateCommand } from "./schema.js";
+import { ConfigSchema, type WetConfig, type Backlog, BacklogSchema, type QualityGateCommand } from "./schema.js";
 
-export function loadConfig(configPath = "wqb.config.yaml"): WqbConfig {
+export function loadConfig(configPath = "wet.config.yaml"): WetConfig {
   if (!fs.existsSync(configPath)) {
     return ConfigSchema.parse({});
   }

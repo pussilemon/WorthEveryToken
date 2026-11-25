@@ -17,6 +17,6 @@ Audit the repository at `{{REPO_PATH}}` to identify concrete, high-impact improv
 - Declare `depends_on` if Task B relies on changes in Task A.
 
 ## Output Format
-Return ONLY valid JSON matching the BacklogSchema inside `<WQB_BACKLOG_JSON>...</WQB_BACKLOG_JSON>` tags.
-Include a concise human-readable summary in Markdown inside `<WQB_FIX_PLAN_MD>...</WQB_FIX_PLAN_MD>` tags.
-End your response with `<WQB_EXIT_SIGNAL status="DONE"/>`.
+Return ONLY valid JSON matching the BacklogSchema inside `<WET_BACKLOG_JSON>...</WET_BACKLOG_JSON>` tags.
+Include a concise human-readable summary in Markdown inside `<WET_FIX_PLAN_MD>...</WET_FIX_PLAN_MD>` tags.
+End your response with `<WET_EXIT_SIGNAL status="DONE"/>`.

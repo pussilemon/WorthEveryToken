@@ -7,6 +7,8 @@ export interface SchedulerOptions {
   maxParallelWorkers: number;
 }
 
+export type TaskExecutionOutcome = "completed" | "failed" | "skipped";
+
 export class DagScheduler {
   private readonly maxWorkers: number;
   private readonly activeFiles = new Set<string>();
@@ -32,7 +34,7 @@ export class DagScheduler {
       if (task) {
         for (const depId of task.depends_on) {
           if (!taskMap.has(depId)) {
-            continue; // dependency might be external or already pruned
+            continue;
           }
           if (!visited.has(depId)) {
             dfs(depId, [...pathStack, depId]);
@@ -146,11 +148,24 @@ export class DagScheduler {
 
   public async runScheduler(
     tasks: Task[],
-    executeTask: (task: Task) => Promise<boolean>
+    executeTask: (task: Task) => Promise<TaskExecutionOutcome>
   ): Promise<void> {
     const sorted = this.topologicalSort(tasks);
     const running = new Set<string>();
-    const completed = new Set<string>();
+
+    // Pre-populate completed and failed sets for resume support
+    const completed = new Set<string>(
+      sorted.filter((t) => t.status === "completed").map((t) => t.id)
+    );
+    const failed = new Set<string>(
+      sorted.filter((t) => t.status === "failed" || t.status === "skipped").map((t) => t.id)
+    );
+
+    // Initial cascade for pre-failed tasks
+    for (const failedId of failed) {
+      this.cascadeDependencyFailure(failedId, sorted);
+    }
+
     const limit = pLimit(this.maxWorkers);
 
     const canRun = (t: Task): boolean => {
@@ -188,17 +203,23 @@ export class DagScheduler {
 
             limit(async () => {
               try {
-                const success = await executeTask(task);
-                if (success) {
+                const outcome = await executeTask(task);
+                if (outcome === "completed") {
                   task.status = "completed";
                   completed.add(task.id);
+                } else if (outcome === "skipped") {
+                  task.status = "skipped";
+                  failed.add(task.id);
+                  this.cascadeDependencyFailure(task.id, sorted);
                 } else {
                   task.status = "failed";
+                  failed.add(task.id);
                   this.cascadeDependencyFailure(task.id, sorted);
                 }
               } catch (err) {
                 task.status = "failed";
                 task.failure_reason = err instanceof Error ? err.message : String(err);
+                failed.add(task.id);
                 this.cascadeDependencyFailure(task.id, sorted);
               } finally {
                 this.releaseFiles(task.target_files);
@@ -215,7 +236,6 @@ export class DagScheduler {
         if (pendingCount === 0 && activeCount === 0) {
           resolve();
         } else if (!launchedAny && activeCount === 0 && pendingCount > 0) {
-          // Deadlock or unresolvable dependencies
           logger.warn("Scheduler reached state with no runnable tasks but pending tasks remain");
           for (const t of sorted.filter((task) => task.status === "pending")) {
             t.status = "skipped";

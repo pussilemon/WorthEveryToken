@@ -13,4 +13,4 @@ Fix ONLY the root cause of the failure without weakening tests, deleting asserti
 ```
 
 Apply the minimal fix to make the gate pass. Do NOT commit.
-End with `<WQB_EXIT_SIGNAL status="DONE"/>` or `<WQB_EXIT_SIGNAL status="BLOCKED" reason="..."/>`.
+End with `<WET_EXIT_SIGNAL status="DONE"/>` or `<WET_EXIT_SIGNAL status="BLOCKED" reason="..."/>`.

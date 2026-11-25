@@ -1,11 +1,12 @@
-# Dockerfile.sandbox - Weekend Quota Burner (wqb)
+# Dockerfile.sandbox - WorthEveryToken (wet)
 # Headless sandbox container for autonomous background runs
 
 FROM node:22-slim
 
-# Install system dependencies (git, ripgrep, jq, procps, python3, etc.)
+# Install system dependencies & build tools (build-essential for native node-pty compilation)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
+    build-essential \
     ca-certificates \
     curl \
     git \
@@ -15,13 +16,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Claude Code CLI and tools globally
+# Enable corepack for pnpm support
+RUN corepack enable
+
+# Install Claude Code CLI globally
 RUN npm install -g @anthropic-ai/claude-code
 
-# Create non-root user 'wqb' with uid 1000 (matching host permissions)
-RUN useradd -m -s /bin/bash -u 1000 wqb || true
+# Create non-root user 'wet' with uid 1000 (matching host permissions)
+RUN useradd -m -s /bin/bash -u 1000 wet || true
 
-USER wqb
+# Note on Claude & Agy credentials:
+# At runtime, mount host credential directories into the container:
+#   -v ~/.claude:/home/wet/.claude:ro
+#   -v ~/.gemini:/home/wet/.gemini:ro
+
+USER wet
 WORKDIR /workspace
 
 CMD ["sleep", "infinity"]
