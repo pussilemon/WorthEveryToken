@@ -1,0 +1,27 @@
+# Dockerfile.sandbox - Weekend Quota Burner (wqb)
+# Headless sandbox container for autonomous background runs
+
+FROM node:22-slim
+
+# Install system dependencies (git, ripgrep, jq, procps, python3, etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    ca-certificates \
+    curl \
+    git \
+    jq \
+    procps \
+    python3 \
+    ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Claude Code CLI and tools globally
+RUN npm install -g @anthropic-ai/claude-code
+
+# Create non-root user 'wqb' with uid 1000 (matching host permissions)
+RUN useradd -m -s /bin/bash -u 1000 wqb || true
+
+USER wqb
+WORKDIR /workspace
+
+CMD ["sleep", "infinity"]

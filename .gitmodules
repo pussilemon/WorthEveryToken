@@ -1,0 +1,9 @@
+[submodule "vendor/ralph-claude-code"]
+	path = vendor/ralph-claude-code
+	url = https://github.com/pussilemon/ralph-claude-code.git
+[submodule "vendor/devsforge-orchestrator"]
+	path = vendor/devsforge-orchestrator
+	url = https://github.com/pussilemon/orchestrator.git
+[submodule "vendor/agentburn"]
+	path = vendor/agentburn
+	url = https://github.com/pussilemon/agentburn.git
